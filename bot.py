@@ -4,7 +4,6 @@ import requests
 import asyncio
 import datetime
 import re
-from dateutil import parser
 from dateutil.relativedelta import relativedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -25,9 +24,6 @@ if not BOT_TOKEN or not DEEPSEEK_API_KEY:
 ALLOWED_USERS = [
     283805448,  # ← ВАШ TELEGRAM ID
 ]
-
-# Хранилище временных данных для диалогов (состояния)
-user_states = {}
 
 def is_allowed(user_id):
     return user_id in ALLOWED_USERS
@@ -140,8 +136,10 @@ def get_task_confirmation_keyboard(task_text, remind_time=None):
 
 # ===== КОМАНДА /start =====
 @dp.message(Command("start"))
-@allowed_only
 async def start(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён. Вы не авторизованы.")
+        return
     await message.answer(
         "👋 Привет! Я умный бот-помощник.\n\n"
         "📌 Что я умею:\n"
@@ -158,8 +156,10 @@ async def start(message: types.Message):
 
 # ===== КОМАНДА /tasks =====
 @dp.message(Command("tasks"))
-@allowed_only
 async def list_tasks(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
     cur.execute("SELECT id, text, date, remind_time FROM tasks ORDER BY id")
@@ -179,8 +179,10 @@ async def list_tasks(message: types.Message):
 
 # ===== КОМАНДА /del =====
 @dp.message(Command("del"))
-@allowed_only
 async def delete_task(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
     try:
         task_id = int(message.text.replace("/del", "").strip())
     except:
@@ -196,6 +198,9 @@ async def delete_task(message: types.Message):
 # ===== КОМАНДА /adduser =====
 @dp.message(Command("adduser"))
 async def add_user(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
     if message.from_user.id != ALLOWED_USERS[0]:
         await message.answer("⛔ Только владелец может добавлять пользователей.")
         return
@@ -211,8 +216,10 @@ async def add_user(message: types.Message):
 
 # ===== КОМАНДА /users =====
 @dp.message(Command("users"))
-@allowed_only
 async def list_users(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
     if message.from_user.id != ALLOWED_USERS[0]:
         await message.answer("⛔ Только владелец может просматривать список.")
         return
@@ -224,6 +231,9 @@ async def list_users(message: types.Message):
 # ===== КОМАНДА /deluser =====
 @dp.message(Command("deluser"))
 async def delete_user(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
     if message.from_user.id != ALLOWED_USERS[0]:
         await message.answer("⛔ Только владелец может удалять пользователей.")
         return
@@ -267,10 +277,11 @@ async def handle_callback(callback: types.CallbackQuery):
 
 # ===== УМНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ =====
 @dp.message()
-@allowed_only
 async def smart_handler(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён. Вы не авторизованы.")
+        return
     text = message.text
-    user_id = message.from_user.id
     
     # 1. Если есть слово "напомни" — сразу сохраняем с таймером
     if "напомни" in text.lower():
