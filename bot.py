@@ -53,8 +53,8 @@ def get_main_keyboard():
                 KeyboardButton(text="⏰ Напомнить")
             ]
         ],
-        resize_keyboard=True,  # Чтобы кнопки были компактными
-        one_time_keyboard=False  # Чтобы кнопки не исчезали после нажатия
+        resize_keyboard=True,
+        one_time_keyboard=False
     )
     return keyboard
 
@@ -75,7 +75,6 @@ def parse_time_from_text(text):
     now = get_moscow_now()
     text_lower = text.lower()
     
-    # "через X минут/часов"
     match = re.search(r'через\s+(\d+)\s*(минут|минуты|минуту|час|часа|часов)', text_lower)
     if match:
         amount = int(match.group(1))
@@ -86,7 +85,6 @@ def parse_time_from_text(text):
             delta = relativedelta(minutes=amount)
         return now + delta
     
-    # "в 15:30"
     match = re.search(r'в\s*(\d{1,2})[:.-](\d{2})', text)
     if match:
         hour = int(match.group(1))
@@ -96,7 +94,6 @@ def parse_time_from_text(text):
             dt += datetime.timedelta(days=1)
         return dt
     
-    # "завтра в 15:30"
     match = re.search(r'завтра\s*в\s*(\d{1,2})[:.-](\d{2})', text_lower)
     if match:
         hour = int(match.group(1))
@@ -168,7 +165,6 @@ async def add_task_button(message: types.Message):
 
 @dp.message(lambda message: message.text == "🗑 Удалить задачу")
 async def delete_task_button(message: types.Message):
-    """Показывает список задач с кнопками для удаления"""
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
     cur.execute("SELECT id, text FROM tasks ORDER BY id")
@@ -179,7 +175,6 @@ async def delete_task_button(message: types.Message):
         await message.answer("📭 У вас пока нет задач.", reply_markup=get_main_keyboard())
         return
     
-    # Создаём клавиатуру с кнопками "Удалить" для каждой задачи
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     for row in rows:
         task_id, text = row
@@ -322,20 +317,28 @@ async def smart_handler(message: types.Message):
     if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить"]:
         return
     
-    # 1. Если есть "напомни" — задача с таймером
-    if "напомни" in text.lower():
-        clean_text = re.sub(r'^напомни\s*(мне\s*)?', '', text, flags=re.IGNORECASE)
-        remind_time = parse_time_from_text(clean_text)
+    # 1. Если есть "напомни" в начале — задача с таймером
+    if text.lower().startswith("напомни"):
+        # Удаляем "напомни мне" или "напомни" из начала
+        clean_text = re.sub(r'^напомни\s+мне\s+', '', text, flags=re.IGNORECASE)
+        clean_text = re.sub(r'^напомни\s+', '', clean_text, flags=re.IGNORECASE)
         
+        remind_time = parse_time_from_text(clean_text)
         if not remind_time:
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
         
+        # Убираем время из текста задачи
         task_text = clean_text
         task_text = re.sub(r'\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
         task_text = re.sub(r'\s*через\s*\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', task_text)
         task_text = re.sub(r'\s*завтра\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
         task_text = task_text.strip()
+        
+        # Если после удаления времени текст остался пустым
+        if not task_text:
+            await message.answer("❌ Я не понял, что именно нужно сделать. Напиши задачу.")
+            return
         
         keyboard = get_task_confirmation_keyboard(task_text, remind_time)
         await message.answer(
@@ -347,6 +350,9 @@ async def smart_handler(message: types.Message):
     # 2. Если есть "добавь задачу" — просто задача
     if "добавь задачу" in text.lower():
         task_text = re.sub(r'добавь\s*задачу\s*', '', text, flags=re.IGNORECASE)
+        if not task_text:
+            await message.answer("❌ Напиши, что нужно добавить.")
+            return
         save_task_to_db(task_text)
         await message.answer(f"✅ Задача добавлена!\n📝 {task_text}", reply_markup=get_main_keyboard())
         return
@@ -354,6 +360,9 @@ async def smart_handler(message: types.Message):
     # 3. Если есть "удали задачу" — удаляем по тексту
     if "удали задачу" in text.lower():
         task_text = re.sub(r'удали\s*задачу\s*', '', text, flags=re.IGNORECASE)
+        if not task_text:
+            await message.answer("❌ Напиши, что нужно удалить.")
+            return
         conn = sqlite3.connect('tasks.db')
         cur = conn.cursor()
         cur.execute("DELETE FROM tasks WHERE text LIKE ?", (f"%{task_text}%",))
@@ -371,6 +380,10 @@ async def smart_handler(message: types.Message):
         task_text = re.sub(r'\s*через\s*\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', task_text)
         task_text = re.sub(r'\s*завтра\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
         task_text = task_text.strip()
+        
+        if not task_text:
+            await message.answer("❌ Я не понял, что именно нужно сделать.")
+            return
         
         keyboard = get_task_confirmation_keyboard(task_text, remind_time)
         await message.answer(
