@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
-import pytz  # <--- НОВАЯ БИБЛИОТЕКА
+import pytz
 
 # ===== ЗАГРУЖАЕМ ПЕРЕМЕННЫЕ ИЗ .env =====
 load_dotenv()
@@ -25,13 +25,10 @@ if not BOT_TOKEN or not DEEPSEEK_API_KEY:
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 def get_moscow_now():
-    """Возвращает текущее время по Москве (UTC+3)"""
     return datetime.datetime.now(MOSCOW_TZ)
 
-# ===== БЕЛЫЙ СПИСОК (РАЗРЕШЁННЫЕ ПОЛЬЗОВАТЕЛИ) =====
-ALLOWED_USERS = [
-    283805448,  # ← ВАШ TELEGRAM ID
-]
+# ===== БЕЛЫЙ СПИСОК =====
+ALLOWED_USERS = [283805448]
 
 def is_allowed(user_id):
     return user_id in ALLOWED_USERS
@@ -52,12 +49,12 @@ def init_db():
     conn.commit()
     conn.close()
 
-# === ФУНКЦИЯ ДЛЯ ПАРСИНГА ВРЕМЕНИ (С УЧЁТОМ МОСКВЫ) ===
+# === ФУНКЦИЯ ПАРСИНГА ВРЕМЕНИ ===
 def parse_time_from_text(text):
-    now = get_moscow_now()  # <--- ИСПОЛЬЗУЕМ МОСКОВСКОЕ ВРЕМЯ
+    now = get_moscow_now()
     text_lower = text.lower()
     
-    # 1. Проверяем "через X минут/часов"
+    # "через X минут/часов"
     match = re.search(r'через\s+(\d+)\s*(минут|минуты|минуту|час|часа|часов)', text_lower)
     if match:
         amount = int(match.group(1))
@@ -68,7 +65,7 @@ def parse_time_from_text(text):
             delta = relativedelta(minutes=amount)
         return now + delta
     
-    # 2. Проверяем "в 15:30" или "в 15-30"
+    # "в 15:30"
     match = re.search(r'в\s*(\d{1,2})[:.-](\d{2})', text)
     if match:
         hour = int(match.group(1))
@@ -78,7 +75,7 @@ def parse_time_from_text(text):
             dt += datetime.timedelta(days=1)
         return dt
     
-    # 3. Проверяем "завтра в 15:30"
+    # "завтра в 15:30"
     match = re.search(r'завтра\s*в\s*(\d{1,2})[:.-](\d{2})', text_lower)
     if match:
         hour = int(match.group(1))
@@ -110,7 +107,7 @@ def ask_deepseek(question):
     except Exception as e:
         return f"❌ Ошибка: {str(e)}"
 
-# ===== ФУНКЦИЯ СОХРАНЕНИЯ ЗАДАЧИ (С МОСКОВСКИМ ВРЕМЕНЕМ) =====
+# === ФУНКЦИЯ СОХРАНЕНИЯ ЗАДАЧИ ===
 def save_task_to_db(text, remind_time=None):
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
@@ -125,7 +122,7 @@ def save_task_to_db(text, remind_time=None):
     conn.commit()
     conn.close()
 
-# ===== КЛАВИАТУРА ДЛЯ ПОДТВЕРЖДЕНИЯ =====
+# === КЛАВИАТУРА ДЛЯ ПОДТВЕРЖДЕНИЯ ===
 def get_task_confirmation_keyboard(task_text, remind_time=None):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -135,8 +132,62 @@ def get_task_confirmation_keyboard(task_text, remind_time=None):
     ])
     return keyboard
 
-# ===== ВСЕ КОМАНДЫ (start, tasks, del, adduser, users, deluser) =====
-# ... (оставляем их без изменений, они уже есть в вашем коде)
+# ===== КОМАНДЫ =====
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+    await message.answer(
+        "👋 Привет! Я умный бот-помощник.\n\n"
+        "📌 Что я умею:\n"
+        "• 'напомни мне в 15:00 купить молоко' — добавлю задачу с напоминанием\n"
+        "• 'напомни через 30 минут позвонить' — напомню через 30 минут\n"
+        "• 'добавь задачу купить молоко' — просто добавлю без таймера\n\n"
+        "📌 Команды:\n"
+        "/tasks — показать все задачи\n"
+        "/del номер — удалить задачу\n\n"
+        "💬 Просто напиши вопрос — я отвечу через DeepSeek!"
+    )
+
+@dp.message(Command("tasks"))
+async def list_tasks(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+    conn = sqlite3.connect('tasks.db')
+    cur = conn.cursor()
+    cur.execute("SELECT id, text, date, remind_time FROM tasks ORDER BY id")
+    rows = cur.fetchall()
+    conn.close()
+    
+    if not rows:
+        return await message.answer("📭 У вас пока нет задач.")
+    
+    answer = "📋 Ваши задачи:\n\n"
+    for row in rows:
+        answer += f"{row[0]}. {row[1]}\n"
+        if row[3]:
+            answer += f"   ⏰ Напоминание: {row[3]}\n"
+        answer += f"   📅 Добавлено: {row[2]}\n\n"
+    await message.answer(answer)
+
+@dp.message(Command("del"))
+async def delete_task(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+    try:
+        task_id = int(message.text.replace("/del", "").strip())
+    except:
+        return await message.answer("❌ Напишите номер задачи, например: /del 2")
+    
+    conn = sqlite3.connect('tasks.db')
+    cur = conn.cursor()
+    cur.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
+    await message.answer(f"🗑️ Задача №{task_id} удалена.")
 
 # ===== ОБРАБОТКА НАЖАТИЙ НА КНОПКИ =====
 @dp.callback_query()
@@ -155,7 +206,6 @@ async def handle_callback(callback: types.CallbackQuery):
         
         if remind_time_str != "None":
             remind_time = datetime.datetime.strptime(remind_time_str, "%Y-%m-%d %H:%M")
-            # Делаем время московским (добавляем часовой пояс)
             remind_time = MOSCOW_TZ.localize(remind_time)
             save_task_to_db(task_text, remind_time)
             await callback.message.edit_text(f"✅ Задача добавлена!\n📝 {task_text}\n⏰ Напоминание в {remind_time.strftime('%H:%M')}")
@@ -165,15 +215,16 @@ async def handle_callback(callback: types.CallbackQuery):
         
         await callback.answer()
 
-# ===== УМНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ =====
+# ===== УМНЫЙ ОБРАБОТЧИК =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
-        await message.answer("⛔ Доступ запрещён. Вы не авторизованы.")
+        await message.answer("⛔ Доступ запрещён.")
         return
+    
     text = message.text
     
-    # 1. Если есть слово "напомни" — сразу сохраняем с таймером
+    # 1. Если есть слово "напомни" — добавляем задачу с таймером
     if "напомни" in text.lower():
         clean_text = re.sub(r'^напомни\s*(мне\s*)?', '', text, flags=re.IGNORECASE)
         remind_time = parse_time_from_text(clean_text)
@@ -195,7 +246,7 @@ async def smart_handler(message: types.Message):
         )
         return
     
-    # 2. Если есть слово "добавь задачу" — сохраняем без таймера
+    # 2. Если есть "добавь задачу" — просто добавляем без таймера
     if re.search(r'добавь\s*задачу', text.lower()):
         task_text = re.sub(r'^добавь\s*задачу\s*', '', text, flags=re.IGNORECASE)
         save_task_to_db(task_text)
@@ -218,14 +269,15 @@ async def smart_handler(message: types.Message):
         )
         return
     
-    # 4. Обычное сообщение — спрашиваем, добавлять ли задачу
-    keyboard = get_task_confirmation_keyboard(text, None)
-    await message.answer(
-        f"📝 Добавить как задачу?\n\n{text}",
-        reply_markup=keyboard
-    )
+    # 4. ВСЁ ОСТАЛЬНОЕ — ОТВЕЧАЕМ ЧЕРЕЗ DEEPSEEK (без предложения добавить задачу)
+    await message.answer("🤔 Думаю...")
+    try:
+        answer = ask_deepseek(text)
+        await message.answer(answer)
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка: {str(e)}")
 
-# ===== ФОН ПРОВЕРКА НАПОМИНАНИЙ (ПО МОСКОВСКОМУ ВРЕМЕНИ) =====
+# ===== ФОН ПРОВЕРКА НАПОМИНАНИЙ =====
 async def check_reminders():
     while True:
         try:
