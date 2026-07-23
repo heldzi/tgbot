@@ -27,7 +27,7 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 def get_moscow_now():
     return datetime.datetime.now(MOSCOW_TZ)
 
-# ===== БЕЛЫЙ СПИСОК (РАЗРЕШЁННЫЕ ПОЛЬЗОВАТЕЛИ) =====
+# ===== БЕЛЫЙ СПИСОК =====
 ALLOWED_USERS = [
     283805448,  # ← ВАШ TELEGRAM ID
 ]
@@ -35,7 +35,7 @@ ALLOWED_USERS = [
 def is_allowed(user_id):
     return user_id in ALLOWED_USERS
 
-# ===== ХРАНИЛИЩЕ КОНТЕКСТА (ИСТОРИЯ ДИАЛОГА) =====
+# ===== ХРАНИЛИЩЕ КОНТЕКСТА =====
 user_history = {}
 
 def get_context(user_id):
@@ -90,7 +90,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# === ФУНКЦИЯ ПАРСИНГА ВРЕМЕНИ ===
+# === ПАРСИНГ ВРЕМЕНИ ===
 def parse_time_from_text(text):
     now = get_moscow_now()
     text_lower = text.lower()
@@ -124,7 +124,7 @@ def parse_time_from_text(text):
     
     return None
 
-# === ФУНКЦИЯ ЗАПРОСА К DEEPSEEK (С КОНТЕКСТОМ) ===
+# === ЗАПРОС К DEEPSEEK ===
 def ask_deepseek(question, user_id):
     context = get_context(user_id)
     
@@ -154,7 +154,7 @@ def ask_deepseek(question, user_id):
     except Exception as e:
         return f"❌ Ошибка: {str(e)}"
 
-# === ФУНКЦИЯ СОХРАНЕНИЯ ЗАДАЧИ ===
+# === СОХРАНЕНИЕ ЗАДАЧИ ===
 def save_task_to_db(text, remind_time=None):
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
@@ -169,7 +169,7 @@ def save_task_to_db(text, remind_time=None):
     conn.commit()
     conn.close()
 
-# === КЛАВИАТУРА ДЛЯ ПОДТВЕРЖДЕНИЯ ===
+# === КЛАВИАТУРА ПОДТВЕРЖДЕНИЯ ===
 def get_task_confirmation_keyboard(task_text, remind_time=None):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -228,7 +228,7 @@ async def remind_button(message: types.Message):
         reply_markup=get_main_keyboard()
     )
 
-# ===== ОБРАБОТЧИК УДАЛЕНИЯ ПО КНОПКЕ =====
+# ===== УДАЛЕНИЕ ПО КНОПКЕ =====
 @dp.callback_query(lambda c: c.data and c.data.startswith("del_task_"))
 async def delete_task_by_callback(callback: types.CallbackQuery):
     task_id = int(callback.data.split("_")[2])
@@ -248,7 +248,7 @@ async def delete_task_by_callback(callback: types.CallbackQuery):
     conn.close()
     await callback.answer()
 
-# ===== ОБРАБОТЧИК ПОДТВЕРЖДЕНИЯ ДОБАВЛЕНИЯ =====
+# ===== ПОДТВЕРЖДЕНИЕ ДОБАВЛЕНИЯ =====
 @dp.callback_query()
 async def handle_callback(callback: types.CallbackQuery):
     data = callback.data
@@ -351,7 +351,7 @@ async def clear_history(message: types.Message):
     else:
         await message.answer("📭 История и так пуста.", reply_markup=get_main_keyboard())
 
-# ===== УМНЫЙ ОБРАБОТЧИК =====
+# ===== УМНЫЙ ОБРАБОТЧИК (БЕЗ ЛИШНИХ БУКВ) =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -364,16 +364,20 @@ async def smart_handler(message: types.Message):
     if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить"]:
         return
     
-    # 1. "напомни" — задача с таймером
+    # 1. Если начинается с "напомни" — задача с таймером
     if text.lower().startswith("напомни"):
-        clean_text = re.sub(r'^напомни\s+мне\s+', '', text, flags=re.IGNORECASE)
-        clean_text = re.sub(r'^напомни\s+', '', clean_text, flags=re.IGNORECASE)
+        # Убираем слова "напомни", "мне" (если есть)
+        words = text.split()
+        while words and words[0].lower() in ["напомни", "мне"]:
+            words.pop(0)
+        clean_text = " ".join(words)
         
         remind_time = parse_time_from_text(clean_text)
         if not remind_time:
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
         
+        # Убираем время из текста задачи
         task_text = clean_text
         task_text = re.sub(r'\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
         task_text = re.sub(r'\s*через\s*\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', task_text)
@@ -436,7 +440,7 @@ async def smart_handler(message: types.Message):
         )
         return
     
-    # 5. ВСЁ ОСТАЛЬНОЕ — ответ через DeepSeek с контекстом (БЕЗ "ДУМАЮ")
+    # 5. ВСЁ ОСТАЛЬНОЕ — ответ через DeepSeek
     try:
         answer = ask_deepseek(text, user_id)
         await message.answer(answer, reply_markup=get_main_keyboard())
