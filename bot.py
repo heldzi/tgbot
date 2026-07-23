@@ -10,7 +10,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 import pytz
-from aiohttp import web  # ← НОВОЕ: для веб-сервера
+from aiohttp import web
 
 # ===== ЗАГРУЖАЕМ ПЕРЕМЕННЫЕ ИЗ .env =====
 load_dotenv()
@@ -380,21 +380,41 @@ async def smart_handler(message: types.Message):
     
     # 1. "напомни" — задача с таймером
     if text.lower().startswith("напомни"):
+        # Убираем ВСЕ первые слова-триггеры
         words = text.split()
         while words and words[0].lower() in ["напомни", "мне"]:
             words.pop(0)
         clean_text = " ".join(words)
         
-        remind_time = parse_time_from_text(clean_text)
+        # Находим и удаляем фразу со временем
+        remind_time = None
+        
+        # Проверяем "через X минут/часов"
+        match = re.search(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', clean_text)
+        if match:
+            remind_time = parse_time_from_text(clean_text)
+            clean_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', clean_text)
+        
+        # Проверяем "в 15:30"
+        if not remind_time:
+            match = re.search(r'в\s*\d{1,2}[:.-]\d{2}', clean_text)
+            if match:
+                remind_time = parse_time_from_text(clean_text)
+                clean_text = re.sub(r'в\s*\d{1,2}[:.-]\d{2}', '', clean_text)
+        
+        # Проверяем "завтра в 15:30"
+        if not remind_time:
+            match = re.search(r'завтра\s*в\s*\d{1,2}[:.-]\d{2}', clean_text)
+            if match:
+                remind_time = parse_time_from_text(clean_text)
+                clean_text = re.sub(r'завтра\s*в\s*\d{1,2}[:.-]\d{2}', '', clean_text)
+        
         if not remind_time:
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
         
-        task_text = clean_text
-        task_text = re.sub(r'\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
-        task_text = re.sub(r'\s*через\s*\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', task_text)
-        task_text = re.sub(r'\s*завтра\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
-        task_text = task_text.strip()
+        # Убираем лишние пробелы
+        task_text = clean_text.strip()
         
         if not task_text:
             await message.answer("❌ Я не понял, что именно нужно сделать. Напиши задачу.")
