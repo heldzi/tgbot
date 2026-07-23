@@ -328,7 +328,7 @@ async def clear_history(message: types.Message):
     else:
         await message.answer("📭 История и так пуста.", reply_markup=get_main_keyboard())
 
-# ===== НОВАЯ ЛОГИКА (НАКОНЕЦ-ТО РАБОТАЕТ) =====
+# ===== САМАЯ ПРОСТАЯ И РАБОЧАЯ ЛОГИКА =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -353,22 +353,34 @@ async def smart_handler(message: types.Message):
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
         
-        # УДАЛЯЕМ ИЗ ТЕКСТА ВСЁ, ЧТО СОВПАЛО С РЕГУЛЯРКОЙ
-        patterns = [
-            r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)',
-            r'в\s+\d{1,2}[:.-]\d{2}',
-            r'завтра\s+в\s+\d{1,2}[:.-]\d{2}'
-        ]
+        # Удаляем всё, что связано с временем (максимально просто)
+        words = clean_text.split()
+        stop_words = {'через', 'в', 'завтра', 'минут', 'минуты', 'минуту', 'час', 'часа', 'часов'}
+        task_words = []
         
-        task_text = clean_text
-        for pattern in patterns:
-            task_text = re.sub(pattern, '', task_text, flags=re.IGNORECASE)
+        i = 0
+        while i < len(words):
+            word = words[i].lower()
+            # Если это слово-триггер — пропускаем его и следующее число
+            if word in stop_words:
+                i += 1
+                # Пропускаем следующее число (если оно есть)
+                if i < len(words) and re.match(r'^\d+$', words[i]):
+                    i += 1
+                continue
+            # Пропускаем любые числа
+            if re.match(r'^\d+$', words[i]):
+                i += 1
+                continue
+            # Пропускаем время в формате 15:30
+            if re.match(r'^\d{1,2}[:.-]\d{2}$', words[i]):
+                i += 1
+                continue
+            # Остальное добавляем
+            task_words.append(words[i])
+            i += 1
         
-        # ДОПОЛНИТЕЛЬНО удаляем слова, которые могут остаться
-        task_text = re.sub(r'\b(минут|минуты|минуту|час|часа|часов)\b', '', task_text, flags=re.IGNORECASE)
-        
-        # Чистим лишние пробелы
-        task_text = re.sub(r'\s+', ' ', task_text).strip()
+        task_text = " ".join(task_words).strip()
         
         if not task_text:
             await message.answer("❌ Я не понял, что именно нужно сделать. Напиши задачу.")
@@ -409,19 +421,28 @@ async def smart_handler(message: types.Message):
     # 4. Если есть время
     remind_time = parse_time_from_text(text)
     if remind_time:
-        patterns = [
-            r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)',
-            r'в\s+\d{1,2}[:.-]\d{2}',
-            r'завтра\s+в\s+\d{1,2}[:.-]\d{2}'
-        ]
+        words = text.split()
+        stop_words = {'через', 'в', 'завтра', 'минут', 'минуты', 'минуту', 'час', 'часа', 'часов'}
+        task_words = []
         
-        task_text = text
-        for pattern in patterns:
-            task_text = re.sub(pattern, '', task_text, flags=re.IGNORECASE)
+        i = 0
+        while i < len(words):
+            word = words[i].lower()
+            if word in stop_words:
+                i += 1
+                if i < len(words) and re.match(r'^\d+$', words[i]):
+                    i += 1
+                continue
+            if re.match(r'^\d+$', words[i]):
+                i += 1
+                continue
+            if re.match(r'^\d{1,2}[:.-]\d{2}$', words[i]):
+                i += 1
+                continue
+            task_words.append(words[i])
+            i += 1
         
-        task_text = re.sub(r'\b(минут|минуты|минуту|час|часа|часов)\b', '', task_text, flags=re.IGNORECASE)
-        task_text = re.sub(r'\s+', ' ', task_text).strip()
-        
+        task_text = " ".join(task_words).strip()
         if not task_text:
             await message.answer("❌ Я не понял, что именно нужно сделать.")
             return
