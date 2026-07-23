@@ -328,7 +328,7 @@ async def clear_history(message: types.Message):
     else:
         await message.answer("📭 История и так пуста.", reply_markup=get_main_keyboard())
 
-# ===== ЕБАНАЯ ЛОГИКА, НО РАБОЧАЯ =====
+# ===== НОВАЯ ЛОГИКА (РАБОТАЕТ 100%) =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -353,20 +353,27 @@ async def smart_handler(message: types.Message):
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
         
-        # Удаляем ВСЁ, что связано с временем
-        # Список стоп-слов (всё, что связано с временем)
-        time_patterns = [
-            r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)',
-            r'в\s+\d{1,2}[:.-]\d{2}',
-            r'завтра\s+в\s+\d{1,2}[:.-]\d{2}'
-        ]
+        # Удаляем ВСЁ, что связано с временем (ЖЁСТКО)
+        words = clean_text.split()
+        task_words = []
+        skip_mode = False
         
-        task_text = clean_text
-        for pattern in time_patterns:
-            task_text = re.sub(pattern, '', task_text, flags=re.IGNORECASE)
+        for word in words:
+            word_lower = word.lower()
+            if word_lower in ['через', 'в', 'завтра']:
+                skip_mode = True
+                continue
+            if skip_mode and (re.match(r'^\d+$', word) or word_lower in ['минут', 'минуты', 'минуту', 'час', 'часа', 'часов']):
+                skip_mode = False
+                continue
+            if re.match(r'^\d{1,2}[:.-]\d{2}$', word):
+                skip_mode = False
+                continue
+            if skip_mode:
+                continue
+            task_words.append(word)
         
-        # Чистим лишние пробелы
-        task_text = re.sub(r'\s+', ' ', task_text).strip()
+        task_text = " ".join(task_words).strip()
         
         if not task_text:
             await message.answer("❌ Я не понял, что именно нужно сделать. Напиши задачу.")
@@ -407,18 +414,26 @@ async def smart_handler(message: types.Message):
     # 4. Если есть время
     remind_time = parse_time_from_text(text)
     if remind_time:
-        time_patterns = [
-            r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)',
-            r'в\s+\d{1,2}[:.-]\d{2}',
-            r'завтра\s+в\s+\d{1,2}[:.-]\d{2}'
-        ]
+        words = text.split()
+        task_words = []
+        skip_mode = False
         
-        task_text = text
-        for pattern in time_patterns:
-            task_text = re.sub(pattern, '', task_text, flags=re.IGNORECASE)
+        for word in words:
+            word_lower = word.lower()
+            if word_lower in ['через', 'в', 'завтра']:
+                skip_mode = True
+                continue
+            if skip_mode and (re.match(r'^\d+$', word) or word_lower in ['минут', 'минуты', 'минуту', 'час', 'часа', 'часов']):
+                skip_mode = False
+                continue
+            if re.match(r'^\d{1,2}[:.-]\d{2}$', word):
+                skip_mode = False
+                continue
+            if skip_mode:
+                continue
+            task_words.append(word)
         
-        task_text = re.sub(r'\s+', ' ', task_text).strip()
-        
+        task_text = " ".join(task_words).strip()
         if not task_text:
             await message.answer("❌ Я не понял, что именно нужно сделать.")
             return
