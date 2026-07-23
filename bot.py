@@ -27,8 +27,10 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 def get_moscow_now():
     return datetime.datetime.now(MOSCOW_TZ)
 
-# ===== БЕЛЫЙ СПИСОК =====
-ALLOWED_USERS = [283805448]
+# ===== БЕЛЫЙ СПИСОК (РАЗРЕШЁННЫЕ ПОЛЬЗОВАТЕЛИ) =====
+ALLOWED_USERS = [
+    283805448,  # ← ВАШ TELEGRAM ID
+]
 
 def is_allowed(user_id):
     return user_id in ALLOWED_USERS
@@ -222,15 +224,15 @@ async def smart_handler(message: types.Message):
         await message.answer("⛔ Доступ запрещён.")
         return
     
-    text = message.text
+    text = message.text.strip()
     
-    # 1. Если есть слово "напомни" — добавляем задачу с таймером
-    if "напомни" in text.lower():
+    # 1. Если начинается с "напомни" — задача с таймером
+    if text.lower().startswith("напомни"):
         clean_text = re.sub(r'^напомни\s*(мне\s*)?', '', text, flags=re.IGNORECASE)
         remind_time = parse_time_from_text(clean_text)
         
         if not remind_time:
-            await message.answer("❌ Я не понял время. Напиши, например: 'напомни мне в 15:00 купить молоко'")
+            await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
         
         task_text = clean_text
@@ -246,30 +248,14 @@ async def smart_handler(message: types.Message):
         )
         return
     
-    # 2. Если есть "добавь задачу" — просто добавляем без таймера
-    if re.search(r'добавь\s*задачу', text.lower()):
+    # 2. Если начинается с "добавь задачу" — просто задача
+    if text.lower().startswith("добавь задачу"):
         task_text = re.sub(r'^добавь\s*задачу\s*', '', text, flags=re.IGNORECASE)
         save_task_to_db(task_text)
         await message.answer(f"✅ Задача добавлена!\n📝 {task_text}")
         return
     
-    # 3. Если есть время в тексте — предлагаем добавить с напоминанием
-    remind_time = parse_time_from_text(text)
-    if remind_time:
-        task_text = text
-        task_text = re.sub(r'\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
-        task_text = re.sub(r'\s*через\s*\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', task_text)
-        task_text = re.sub(r'\s*завтра\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
-        task_text = task_text.strip()
-        
-        keyboard = get_task_confirmation_keyboard(task_text, remind_time)
-        await message.answer(
-            f"📝 Задача: {task_text}\n⏰ Напоминание в {remind_time.strftime('%H:%M')}\n\nДобавить?",
-            reply_markup=keyboard
-        )
-        return
-    
-    # 4. ВСЁ ОСТАЛЬНОЕ — ОТВЕЧАЕМ ЧЕРЕЗ DEEPSEEK (без предложения добавить задачу)
+    # 3. ВСЁ ОСТАЛЬНОЕ — ответ через DeepSeek
     await message.answer("🤔 Думаю...")
     try:
         answer = ask_deepseek(text)
