@@ -35,13 +35,33 @@ ALLOWED_USERS = [
 def is_allowed(user_id):
     return user_id in ALLOWED_USERS
 
+# ===== ХРАНИЛИЩЕ КОНТЕКСТА (ИСТОРИЯ ДИАЛОГА) =====
+user_history = {}
+
+def get_context(user_id):
+    if user_id not in user_history:
+        return ""
+    history = user_history[user_id][-10:]
+    context = "Предыдущие сообщения:\n"
+    for entry in history:
+        role = "Пользователь" if entry["role"] == "user" else "Ассистент"
+        context += f"{role}: {entry['content']}\n"
+    context += "\nТекущий вопрос: "
+    return context
+
+def add_to_history(user_id, role, content):
+    if user_id not in user_history:
+        user_history[user_id] = []
+    user_history[user_id].append({"role": role, "content": content})
+    if len(user_history[user_id]) > 20:
+        user_history[user_id] = user_history[user_id][-20:]
+
 # ===== СОЗДАЁМ БОТА =====
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ===== КЛАВИАТУРА (БЫСТРЫЕ КНОПКИ) =====
+# ===== КЛАВИАТУРА =====
 def get_main_keyboard():
-    """Кнопки, которые всегда показываются внизу экрана"""
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -104,22 +124,31 @@ def parse_time_from_text(text):
     
     return None
 
-# === ФУНКЦИЯ ЗАПРОСА К DEEPSEEK ===
-def ask_deepseek(question):
+# === ФУНКЦИЯ ЗАПРОСА К DEEPSEEK (С КОНТЕКСТОМ) ===
+def ask_deepseek(question, user_id):
+    context = get_context(user_id)
+    
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
+    
+    full_prompt = f"{context}{question}"
+    
     data = {
         "model": "deepseek-chat",
-        "messages": [{"role": "user", "content": question}],
+        "messages": [{"role": "user", "content": full_prompt}],
         "max_tokens": 500
     }
+    
     try:
         response = requests.post(url, json=data, headers=headers, timeout=30)
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
+            answer = response.json()["choices"][0]["message"]["content"]
+            add_to_history(user_id, "user", question)
+            add_to_history(user_id, "assistant", answer)
+            return answer
         else:
             return f"❌ Ошибка API: {response.status_code}"
     except Exception as e:
@@ -252,14 +281,19 @@ async def start(message: types.Message):
         await message.answer("⛔ Доступ запрещён.")
         return
     
+    user_id = message.from_user.id
+    if user_id in user_history:
+        user_history[user_id] = []
+    
     await message.answer(
-        "👋 Привет! Я умный бот-помощник.\n\n"
+        "👋 Привет! Я умный бот-помощник с памятью.\n\n"
         "📌 Что я умею:\n"
         "• 'напомни мне в 15:00 купить молоко' — добавлю задачу с напоминанием\n"
         "• 'добавь задачу купить молоко' — просто добавлю без таймера\n"
         "• 'удали задачу купить молоко' — удалю задачи по тексту\n"
         "• Кнопки внизу для быстрого доступа\n\n"
-        "💬 Или просто напиши вопрос — я отвечу через DeepSeek!",
+        "🧠 Я запоминаю контекст диалога, чтобы отвечать на уточняющие вопросы!\n\n"
+        "💬 Просто напиши вопрос — я отвечу через DeepSeek!",
         reply_markup=get_main_keyboard()
     )
 
@@ -304,7 +338,20 @@ async def delete_task_by_id(message: types.Message):
     conn.close()
     await message.answer(f"🗑️ Задача №{task_id} удалена.", reply_markup=get_main_keyboard())
 
-# ===== УМНЫЙ ОБРАБОТЧИК (ДЛЯ ТЕКСТА) =====
+@dp.message(Command("clearhistory"))
+async def clear_history(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+    
+    user_id = message.from_user.id
+    if user_id in user_history:
+        user_history[user_id] = []
+        await message.answer("🧹 История диалога очищена!", reply_markup=get_main_keyboard())
+    else:
+        await message.answer("📭 История и так пуста.", reply_markup=get_main_keyboard())
+
+# ===== УМНЫЙ ОБРАБОТЧИК =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -312,14 +359,13 @@ async def smart_handler(message: types.Message):
         return
     
     text = message.text.strip()
+    user_id = message.from_user.id
     
-    # Если это команда или кнопка — игнорируем
     if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить"]:
         return
     
-    # 1. Если есть "напомни" в начале — задача с таймером
+    # 1. "напомни" — задача с таймером
     if text.lower().startswith("напомни"):
-        # Удаляем "напомни мне" или "напомни" из начала
         clean_text = re.sub(r'^напомни\s+мне\s+', '', text, flags=re.IGNORECASE)
         clean_text = re.sub(r'^напомни\s+', '', clean_text, flags=re.IGNORECASE)
         
@@ -328,14 +374,12 @@ async def smart_handler(message: types.Message):
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
         
-        # Убираем время из текста задачи
         task_text = clean_text
         task_text = re.sub(r'\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
         task_text = re.sub(r'\s*через\s*\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', task_text)
         task_text = re.sub(r'\s*завтра\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
         task_text = task_text.strip()
         
-        # Если после удаления времени текст остался пустым
         if not task_text:
             await message.answer("❌ Я не понял, что именно нужно сделать. Напиши задачу.")
             return
@@ -347,7 +391,7 @@ async def smart_handler(message: types.Message):
         )
         return
     
-    # 2. Если есть "добавь задачу" — просто задача
+    # 2. "добавь задачу" — просто задача
     if "добавь задачу" in text.lower():
         task_text = re.sub(r'добавь\s*задачу\s*', '', text, flags=re.IGNORECASE)
         if not task_text:
@@ -357,7 +401,7 @@ async def smart_handler(message: types.Message):
         await message.answer(f"✅ Задача добавлена!\n📝 {task_text}", reply_markup=get_main_keyboard())
         return
     
-    # 3. Если есть "удали задачу" — удаляем по тексту
+    # 3. "удали задачу" — удаляем по тексту
     if "удали задачу" in text.lower():
         task_text = re.sub(r'удали\s*задачу\s*', '', text, flags=re.IGNORECASE)
         if not task_text:
@@ -372,7 +416,7 @@ async def smart_handler(message: types.Message):
         await message.answer(f"🗑️ Удалено задач: {deleted}, содержащих: {task_text}", reply_markup=get_main_keyboard())
         return
     
-    # 4. Если есть время в тексте — предлагаем добавить с напоминанием
+    # 4. Если есть время — предлагаем добавить с напоминанием
     remind_time = parse_time_from_text(text)
     if remind_time:
         task_text = text
@@ -392,10 +436,9 @@ async def smart_handler(message: types.Message):
         )
         return
     
-    # 5. ВСЁ ОСТАЛЬНОЕ — ответ через DeepSeek
-    await message.answer("🤔 Думаю...")
+    # 5. ВСЁ ОСТАЛЬНОЕ — ответ через DeepSeek с контекстом (БЕЗ "ДУМАЮ")
     try:
-        answer = ask_deepseek(text)
+        answer = ask_deepseek(text, user_id)
         await message.answer(answer, reply_markup=get_main_keyboard())
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
@@ -423,7 +466,7 @@ async def check_reminders():
 # ===== ЗАПУСК =====
 async def main():
     init_db()
-    print("✅ Бот запущен с умным распознаванием и быстрыми кнопками!")
+    print("✅ Бот запущен с умным распознаванием, быстрыми кнопками, памятью и без 'Думаю'!")
     print(f"👥 Разрешённые пользователи: {ALLOWED_USERS}")
     asyncio.create_task(check_reminders())
     await dp.start_polling(bot)
