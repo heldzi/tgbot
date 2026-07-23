@@ -12,31 +12,25 @@ from dotenv import load_dotenv
 import pytz
 from aiohttp import web
 
-# ===== ЗАГРУЖАЕМ ПЕРЕМЕННЫЕ ИЗ .env =====
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 if not BOT_TOKEN or not DEEPSEEK_API_KEY:
-    print("❌ ОШИБКА: Токены не найдены в .env файле!")
+    print("❌ Токены не найдены!")
     exit(1)
 
-# ===== НАСТРОЙКА ВРЕМЕНИ (МОСКВА) =====
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 def get_moscow_now():
     return datetime.datetime.now(MOSCOW_TZ)
 
-# ===== БЕЛЫЙ СПИСОК =====
-ALLOWED_USERS = [
-    283805448,  # ← ВАШ TELEGRAM ID
-]
+ALLOWED_USERS = [283805448]
 
 def is_allowed(user_id):
     return user_id in ALLOWED_USERS
 
-# ===== ХРАНИЛИЩЕ КОНТЕКСТА =====
 user_history = {}
 
 def get_context(user_id):
@@ -57,11 +51,9 @@ def add_to_history(user_id, role, content):
     if len(user_history[user_id]) > 20:
         user_history[user_id] = user_history[user_id][-20:]
 
-# ===== СОЗДАЁМ БОТА =====
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ===== КЛАВИАТУРА =====
 def get_main_keyboard():
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
@@ -79,7 +71,6 @@ def get_main_keyboard():
     )
     return keyboard
 
-# === БАЗА ДАННЫХ ===
 def init_db():
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
@@ -91,7 +82,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# === ПАРСИНГ ВРЕМЕНИ ===
 def parse_time_from_text(text):
     now = get_moscow_now()
     text_lower = text.lower()
@@ -125,24 +115,19 @@ def parse_time_from_text(text):
     
     return None
 
-# === ЗАПРОС К DEEPSEEK ===
 def ask_deepseek(question, user_id):
     context = get_context(user_id)
-    
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
-    
     full_prompt = f"{context}{question}"
-    
     data = {
         "model": "deepseek-chat",
         "messages": [{"role": "user", "content": full_prompt}],
         "max_tokens": 500
     }
-    
     try:
         response = requests.post(url, json=data, headers=headers, timeout=30)
         if response.status_code == 200:
@@ -155,7 +140,6 @@ def ask_deepseek(question, user_id):
     except Exception as e:
         return f"❌ Ошибка: {str(e)}"
 
-# === СОХРАНЕНИЕ ЗАДАЧИ ===
 def save_task_to_db(text, remind_time=None):
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
@@ -170,7 +154,6 @@ def save_task_to_db(text, remind_time=None):
     conn.commit()
     conn.close()
 
-# === КЛАВИАТУРА ПОДТВЕРЖДЕНИЯ ===
 def get_task_confirmation_keyboard(task_text, remind_time=None):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -180,7 +163,6 @@ def get_task_confirmation_keyboard(task_text, remind_time=None):
     ])
     return keyboard
 
-# ===== ВЕБ-СЕРВЕР ДЛЯ HEALTH CHECK =====
 async def health(request):
     return web.Response(text="OK")
 
@@ -191,9 +173,8 @@ async def start_web():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 10000)
     await site.start()
-    print("🌐 Веб-сервер для health check запущен на порту 10000")
+    print("🌐 Веб-сервер запущен на порту 10000")
 
-# ===== ОБРАБОТЧИКИ КНОПОК =====
 @dp.message(lambda message: message.text == "📝 Мои задачи")
 async def show_tasks_button(message: types.Message):
     await list_tasks(message)
@@ -242,41 +223,33 @@ async def remind_button(message: types.Message):
         reply_markup=get_main_keyboard()
     )
 
-# ===== УДАЛЕНИЕ ПО КНОПКЕ =====
 @dp.callback_query(lambda c: c.data and c.data.startswith("del_task_"))
 async def delete_task_by_callback(callback: types.CallbackQuery):
     task_id = int(callback.data.split("_")[2])
-    
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
     cur.execute("SELECT text FROM tasks WHERE id = ?", (task_id,))
     row = cur.fetchone()
-    
     if row:
         cur.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         conn.commit()
         await callback.message.edit_text(f"🗑️ Задача удалена: {row[0]}")
     else:
         await callback.message.edit_text("⚠️ Эта задача уже была удалена.")
-    
     conn.close()
     await callback.answer()
 
-# ===== ПОДТВЕРЖДЕНИЕ ДОБАВЛЕНИЯ =====
 @dp.callback_query()
 async def handle_callback(callback: types.CallbackQuery):
     data = callback.data
-    
     if data == "cancel_task":
         await callback.message.edit_text("❌ Задача отменена.")
         await callback.answer()
         return
-    
     if data.startswith("add_task:"):
         parts = data.split(":", 2)
         task_text = parts[1]
         remind_time_str = parts[2]
-        
         if remind_time_str != "None":
             remind_time = datetime.datetime.strptime(remind_time_str, "%Y-%m-%d %H:%M")
             remind_time = MOSCOW_TZ.localize(remind_time)
@@ -285,28 +258,24 @@ async def handle_callback(callback: types.CallbackQuery):
         else:
             save_task_to_db(task_text)
             await callback.message.edit_text(f"✅ Задача добавлена!\n📝 {task_text}")
-        
         await callback.answer()
 
-# ===== КОМАНДЫ =====
 @dp.message(Command("start"))
 async def start(message: types.Message):
     if not is_allowed(message.from_user.id):
         await message.answer("⛔ Доступ запрещён.")
         return
-    
     user_id = message.from_user.id
     if user_id in user_history:
         user_history[user_id] = []
-    
     await message.answer(
-        "👋 Привет! Я умный бот-помощник с памятью.\n\n"
+        "👋 Привет! Я умный бот-помощник.\n\n"
         "📌 Что я умею:\n"
-        "• 'напомни мне в 15:00 купить молоко' — добавлю задачу с напоминанием\n"
-        "• 'добавь задачу купить молоко' — просто добавлю без таймера\n"
-        "• 'удали задачу купить молоко' — удалю задачи по тексту\n"
+        "• 'напомни мне в 15:00 купить молоко' — задача с напоминанием\n"
+        "• 'добавь задачу купить молоко' — задача без таймера\n"
+        "• 'удали задачу купить молоко' — удаляю по тексту\n"
         "• Кнопки внизу для быстрого доступа\n\n"
-        "🧠 Я запоминаю контекст диалога, чтобы отвечать на уточняющие вопросы!\n\n"
+        "🧠 Я запоминаю контекст диалога!\n"
         "💬 Просто напиши вопрос — я отвечу через DeepSeek!",
         reply_markup=get_main_keyboard()
     )
@@ -316,16 +285,13 @@ async def list_tasks(message: types.Message):
     if not is_allowed(message.from_user.id):
         await message.answer("⛔ Доступ запрещён.")
         return
-    
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
     cur.execute("SELECT id, text, date, remind_time FROM tasks ORDER BY id")
     rows = cur.fetchall()
     conn.close()
-    
     if not rows:
         return await message.answer("📭 У вас пока нет задач.", reply_markup=get_main_keyboard())
-    
     answer = "📋 Ваши задачи:\n\n"
     for row in rows:
         answer += f"{row[0]}. {row[1]}\n"
@@ -339,12 +305,10 @@ async def delete_task_by_id(message: types.Message):
     if not is_allowed(message.from_user.id):
         await message.answer("⛔ Доступ запрещён.")
         return
-    
     try:
         task_id = int(message.text.replace("/del", "").strip())
     except:
         return await message.answer("❌ Напишите номер задачи, например: /del 2")
-    
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
     cur.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
@@ -357,7 +321,6 @@ async def clear_history(message: types.Message):
     if not is_allowed(message.from_user.id):
         await message.answer("⛔ Доступ запрещён.")
         return
-    
     user_id = message.from_user.id
     if user_id in user_history:
         user_history[user_id] = []
@@ -365,7 +328,7 @@ async def clear_history(message: types.Message):
     else:
         await message.answer("📭 История и так пуста.", reply_markup=get_main_keyboard())
 
-# ===== УМНЫЙ ОБРАБОТЧИК =====
+# ===== НОВАЯ ЛОГИКА УДАЛЕНИЯ ВРЕМЕНИ (ПРОСТО И НАДЁЖНО) =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -380,41 +343,25 @@ async def smart_handler(message: types.Message):
     
     # 1. "напомни" — задача с таймером
     if text.lower().startswith("напомни"):
-        # Убираем ВСЕ первые слова-триггеры
-        words = text.split()
-        while words and words[0].lower() in ["напомни", "мне"]:
-            words.pop(0)
-        clean_text = " ".join(words)
+        # Убираем "напомни" и "мне"
+        clean_text = re.sub(r'^напомни\s+', '', text, flags=re.IGNORECASE)
+        clean_text = re.sub(r'^мне\s+', '', clean_text, flags=re.IGNORECASE)
         
-        # Находим и удаляем фразу со временем
-        remind_time = None
-        
-        # Проверяем "через X минут/часов"
-        match = re.search(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', clean_text)
-        if match:
-            remind_time = parse_time_from_text(clean_text)
-            clean_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', clean_text)
-        
-        # Проверяем "в 15:30"
-        if not remind_time:
-            match = re.search(r'в\s*\d{1,2}[:.-]\d{2}', clean_text)
-            if match:
-                remind_time = parse_time_from_text(clean_text)
-                clean_text = re.sub(r'в\s*\d{1,2}[:.-]\d{2}', '', clean_text)
-        
-        # Проверяем "завтра в 15:30"
-        if not remind_time:
-            match = re.search(r'завтра\s*в\s*\d{1,2}[:.-]\d{2}', clean_text)
-            if match:
-                remind_time = parse_time_from_text(clean_text)
-                clean_text = re.sub(r'завтра\s*в\s*\d{1,2}[:.-]\d{2}', '', clean_text)
-        
+        # Находим время
+        remind_time = parse_time_from_text(clean_text)
         if not remind_time:
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
         
+        # Удаляем ВСЁ, что похоже на время (просто режем регуляркой)
+        # Сначала удаляем "через X минут"
+        task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', clean_text, flags=re.IGNORECASE)
+        # Потом удаляем "в 15:30"
+        task_text = re.sub(r'в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
+        # Потом удаляем "завтра в 15:30"
+        task_text = re.sub(r'завтра\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text, flags=re.IGNORECASE)
         # Убираем лишние пробелы
-        task_text = clean_text.strip()
+        task_text = task_text.strip()
         
         if not task_text:
             await message.answer("❌ Я не понял, что именно нужно сделать. Напиши задачу.")
@@ -456,15 +403,13 @@ async def smart_handler(message: types.Message):
     remind_time = parse_time_from_text(text)
     if remind_time:
         task_text = text
-        task_text = re.sub(r'\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
-        task_text = re.sub(r'\s*через\s*\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', task_text)
-        task_text = re.sub(r'\s*завтра\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
+        task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
+        task_text = re.sub(r'завтра\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text, flags=re.IGNORECASE)
         task_text = task_text.strip()
-        
         if not task_text:
             await message.answer("❌ Я не понял, что именно нужно сделать.")
             return
-        
         keyboard = get_task_confirmation_keyboard(task_text, remind_time)
         await message.answer(
             f"📝 Задача: {task_text}\n⏰ Напоминание в {remind_time.strftime('%H:%M')}\n\nДобавить?",
@@ -479,7 +424,6 @@ async def smart_handler(message: types.Message):
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
-# ===== ФОН ПРОВЕРКА НАПОМИНАНИЙ =====
 async def check_reminders():
     while True:
         try:
@@ -499,15 +443,11 @@ async def check_reminders():
             print(f"Ошибка в напоминаниях: {e}")
         await asyncio.sleep(60)
 
-# ===== ЗАПУСК =====
 async def main():
     init_db()
-    print("✅ Бот запущен с умным распознаванием и веб-сервером!")
+    print("✅ Бот запущен!")
     print(f"👥 Разрешённые пользователи: {ALLOWED_USERS}")
-    
-    # Запускаем веб-сервер для health check
     asyncio.create_task(start_web())
-    
     asyncio.create_task(check_reminders())
     await dp.start_polling(bot)
 
