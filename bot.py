@@ -10,6 +10,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 import pytz
+from aiohttp import web  # ← НОВОЕ: для веб-сервера
 
 # ===== ЗАГРУЖАЕМ ПЕРЕМЕННЫЕ ИЗ .env =====
 load_dotenv()
@@ -178,6 +179,19 @@ def get_task_confirmation_keyboard(task_text, remind_time=None):
         ]
     ])
     return keyboard
+
+# ===== ВЕБ-СЕРВЕР ДЛЯ HEALTH CHECK =====
+async def health(request):
+    return web.Response(text="OK")
+
+async def start_web():
+    app = web.Application()
+    app.router.add_get('/', health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 10000)
+    await site.start()
+    print("🌐 Веб-сервер для health check запущен на порту 10000")
 
 # ===== ОБРАБОТЧИКИ КНОПОК =====
 @dp.message(lambda message: message.text == "📝 Мои задачи")
@@ -351,7 +365,7 @@ async def clear_history(message: types.Message):
     else:
         await message.answer("📭 История и так пуста.", reply_markup=get_main_keyboard())
 
-# ===== УМНЫЙ ОБРАБОТЧИК (БЕЗ ЛИШНИХ БУКВ) =====
+# ===== УМНЫЙ ОБРАБОТЧИК =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -364,9 +378,8 @@ async def smart_handler(message: types.Message):
     if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить"]:
         return
     
-    # 1. Если начинается с "напомни" — задача с таймером
+    # 1. "напомни" — задача с таймером
     if text.lower().startswith("напомни"):
-        # Убираем слова "напомни", "мне" (если есть)
         words = text.split()
         while words and words[0].lower() in ["напомни", "мне"]:
             words.pop(0)
@@ -377,7 +390,6 @@ async def smart_handler(message: types.Message):
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
         
-        # Убираем время из текста задачи
         task_text = clean_text
         task_text = re.sub(r'\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
         task_text = re.sub(r'\s*через\s*\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', task_text)
@@ -395,7 +407,7 @@ async def smart_handler(message: types.Message):
         )
         return
     
-    # 2. "добавь задачу" — просто задача
+    # 2. "добавь задачу"
     if "добавь задачу" in text.lower():
         task_text = re.sub(r'добавь\s*задачу\s*', '', text, flags=re.IGNORECASE)
         if not task_text:
@@ -405,7 +417,7 @@ async def smart_handler(message: types.Message):
         await message.answer(f"✅ Задача добавлена!\n📝 {task_text}", reply_markup=get_main_keyboard())
         return
     
-    # 3. "удали задачу" — удаляем по тексту
+    # 3. "удали задачу"
     if "удали задачу" in text.lower():
         task_text = re.sub(r'удали\s*задачу\s*', '', text, flags=re.IGNORECASE)
         if not task_text:
@@ -420,7 +432,7 @@ async def smart_handler(message: types.Message):
         await message.answer(f"🗑️ Удалено задач: {deleted}, содержащих: {task_text}", reply_markup=get_main_keyboard())
         return
     
-    # 4. Если есть время — предлагаем добавить с напоминанием
+    # 4. Если есть время
     remind_time = parse_time_from_text(text)
     if remind_time:
         task_text = text
@@ -440,7 +452,7 @@ async def smart_handler(message: types.Message):
         )
         return
     
-    # 5. ВСЁ ОСТАЛЬНОЕ — ответ через DeepSeek
+    # 5. ВСЁ ОСТАЛЬНОЕ — DeepSeek
     try:
         answer = ask_deepseek(text, user_id)
         await message.answer(answer, reply_markup=get_main_keyboard())
@@ -470,8 +482,12 @@ async def check_reminders():
 # ===== ЗАПУСК =====
 async def main():
     init_db()
-    print("✅ Бот запущен с умным распознаванием, быстрыми кнопками, памятью и без 'Думаю'!")
+    print("✅ Бот запущен с умным распознаванием и веб-сервером!")
     print(f"👥 Разрешённые пользователи: {ALLOWED_USERS}")
+    
+    # Запускаем веб-сервер для health check
+    asyncio.create_task(start_web())
+    
     asyncio.create_task(check_reminders())
     await dp.start_polling(bot)
 
