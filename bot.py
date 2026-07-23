@@ -7,7 +7,7 @@ import re
 from dateutil.relativedelta import relativedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 import pytz
 
@@ -38,6 +38,25 @@ def is_allowed(user_id):
 # ===== СОЗДАЁМ БОТА =====
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# ===== КЛАВИАТУРА (БЫСТРЫЕ КНОПКИ) =====
+def get_main_keyboard():
+    """Кнопки, которые всегда показываются внизу экрана"""
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="📝 Мои задачи"),
+                KeyboardButton(text="➕ Добавить задачу"),
+                KeyboardButton(text="🗑 Удалить задачу")
+            ],
+            [
+                KeyboardButton(text="⏰ Напомнить")
+            ]
+        ],
+        resize_keyboard=True,  # Чтобы кнопки были компактными
+        one_time_keyboard=False  # Чтобы кнопки не исчезали после нажатия
+    )
+    return keyboard
 
 # === БАЗА ДАННЫХ ===
 def init_db():
@@ -134,64 +153,78 @@ def get_task_confirmation_keyboard(task_text, remind_time=None):
     ])
     return keyboard
 
-# ===== КОМАНДЫ =====
-@dp.message(Command("start"))
-async def start(message: types.Message):
-    if not is_allowed(message.from_user.id):
-        await message.answer("⛔ Доступ запрещён.")
-        return
+# ===== ОБРАБОТЧИКИ КНОПОК =====
+@dp.message(lambda message: message.text == "📝 Мои задачи")
+async def show_tasks_button(message: types.Message):
+    await list_tasks(message)
+
+@dp.message(lambda message: message.text == "➕ Добавить задачу")
+async def add_task_button(message: types.Message):
     await message.answer(
-        "👋 Привет! Я умный бот-помощник.\n\n"
-        "📌 Что я умею:\n"
-        "• 'напомни мне в 15:00 купить молоко' — добавлю задачу с напоминанием\n"
-        "• 'напомни через 30 минут позвонить' — напомню через 30 минут\n"
-        "• 'добавь задачу купить молоко' — просто добавлю без таймера\n\n"
-        "📌 Команды:\n"
-        "/tasks — показать все задачи\n"
-        "/del номер — удалить задачу\n\n"
-        "💬 Просто напиши вопрос — я отвечу через DeepSeek!"
+        "✏️ Напишите текст задачи.\n"
+        "Если хотите с напоминанием, добавьте время: 'в 15:00' или 'через 30 минут'",
+        reply_markup=get_main_keyboard()
     )
 
-@dp.message(Command("tasks"))
-async def list_tasks(message: types.Message):
-    if not is_allowed(message.from_user.id):
-        await message.answer("⛔ Доступ запрещён.")
-        return
+@dp.message(lambda message: message.text == "🗑 Удалить задачу")
+async def delete_task_button(message: types.Message):
+    """Показывает список задач с кнопками для удаления"""
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
-    cur.execute("SELECT id, text, date, remind_time FROM tasks ORDER BY id")
+    cur.execute("SELECT id, text FROM tasks ORDER BY id")
     rows = cur.fetchall()
     conn.close()
     
     if not rows:
-        return await message.answer("📭 У вас пока нет задач.")
-    
-    answer = "📋 Ваши задачи:\n\n"
-    for row in rows:
-        answer += f"{row[0]}. {row[1]}\n"
-        if row[3]:
-            answer += f"   ⏰ Напоминание: {row[3]}\n"
-        answer += f"   📅 Добавлено: {row[2]}\n\n"
-    await message.answer(answer)
-
-@dp.message(Command("del"))
-async def delete_task(message: types.Message):
-    if not is_allowed(message.from_user.id):
-        await message.answer("⛔ Доступ запрещён.")
+        await message.answer("📭 У вас пока нет задач.", reply_markup=get_main_keyboard())
         return
-    try:
-        task_id = int(message.text.replace("/del", "").strip())
-    except:
-        return await message.answer("❌ Напишите номер задачи, например: /del 2")
+    
+    # Создаём клавиатуру с кнопками "Удалить" для каждой задачи
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    for row in rows:
+        task_id, text = row
+        display_text = text[:30] + "..." if len(text) > 30 else text
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=f"❌ {display_text}",
+                callback_data=f"del_task_{task_id}"
+            )
+        ])
+    
+    await message.answer(
+        "🗑 Выберите задачу для удаления:",
+        reply_markup=keyboard
+    )
+
+@dp.message(lambda message: message.text == "⏰ Напомнить")
+async def remind_button(message: types.Message):
+    await message.answer(
+        "⏰ Напишите что и когда нужно напомнить.\n"
+        "Примеры: 'купить молоко в 15:00' или 'позвонить через 30 минут'",
+        reply_markup=get_main_keyboard()
+    )
+
+# ===== ОБРАБОТЧИК УДАЛЕНИЯ ПО КНОПКЕ =====
+@dp.callback_query(lambda c: c.data and c.data.startswith("del_task_"))
+async def delete_task_by_callback(callback: types.CallbackQuery):
+    task_id = int(callback.data.split("_")[2])
     
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
-    cur.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    conn.commit()
+    cur.execute("SELECT text FROM tasks WHERE id = ?", (task_id,))
+    row = cur.fetchone()
+    
+    if row:
+        cur.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        conn.commit()
+        await callback.message.edit_text(f"🗑️ Задача удалена: {row[0]}")
+    else:
+        await callback.message.edit_text("⚠️ Эта задача уже была удалена.")
+    
     conn.close()
-    await message.answer(f"🗑️ Задача №{task_id} удалена.")
+    await callback.answer()
 
-# ===== ОБРАБОТКА НАЖАТИЙ НА КНОПКИ =====
+# ===== ОБРАБОТЧИК ПОДТВЕРЖДЕНИЯ ДОБАВЛЕНИЯ =====
 @dp.callback_query()
 async def handle_callback(callback: types.CallbackQuery):
     data = callback.data
@@ -217,7 +250,66 @@ async def handle_callback(callback: types.CallbackQuery):
         
         await callback.answer()
 
-# ===== УМНЫЙ ОБРАБОТЧИК =====
+# ===== КОМАНДЫ =====
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+    
+    await message.answer(
+        "👋 Привет! Я умный бот-помощник.\n\n"
+        "📌 Что я умею:\n"
+        "• 'напомни мне в 15:00 купить молоко' — добавлю задачу с напоминанием\n"
+        "• 'добавь задачу купить молоко' — просто добавлю без таймера\n"
+        "• 'удали задачу купить молоко' — удалю задачи по тексту\n"
+        "• Кнопки внизу для быстрого доступа\n\n"
+        "💬 Или просто напиши вопрос — я отвечу через DeepSeek!",
+        reply_markup=get_main_keyboard()
+    )
+
+@dp.message(Command("tasks"))
+async def list_tasks(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+    
+    conn = sqlite3.connect('tasks.db')
+    cur = conn.cursor()
+    cur.execute("SELECT id, text, date, remind_time FROM tasks ORDER BY id")
+    rows = cur.fetchall()
+    conn.close()
+    
+    if not rows:
+        return await message.answer("📭 У вас пока нет задач.", reply_markup=get_main_keyboard())
+    
+    answer = "📋 Ваши задачи:\n\n"
+    for row in rows:
+        answer += f"{row[0]}. {row[1]}\n"
+        if row[3]:
+            answer += f"   ⏰ Напоминание: {row[3]}\n"
+        answer += f"   📅 Добавлено: {row[2]}\n\n"
+    await message.answer(answer, reply_markup=get_main_keyboard())
+
+@dp.message(Command("del"))
+async def delete_task_by_id(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+    
+    try:
+        task_id = int(message.text.replace("/del", "").strip())
+    except:
+        return await message.answer("❌ Напишите номер задачи, например: /del 2")
+    
+    conn = sqlite3.connect('tasks.db')
+    cur = conn.cursor()
+    cur.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
+    await message.answer(f"🗑️ Задача №{task_id} удалена.", reply_markup=get_main_keyboard())
+
+# ===== УМНЫЙ ОБРАБОТЧИК (ДЛЯ ТЕКСТА) =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -226,8 +318,12 @@ async def smart_handler(message: types.Message):
     
     text = message.text.strip()
     
-    # 1. Если начинается с "напомни" — задача с таймером
-    if text.lower().startswith("напомни"):
+    # Если это команда или кнопка — игнорируем
+    if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить"]:
+        return
+    
+    # 1. Если есть "напомни" — задача с таймером
+    if "напомни" in text.lower():
         clean_text = re.sub(r'^напомни\s*(мне\s*)?', '', text, flags=re.IGNORECASE)
         remind_time = parse_time_from_text(clean_text)
         
@@ -248,20 +344,48 @@ async def smart_handler(message: types.Message):
         )
         return
     
-    # 2. Если начинается с "добавь задачу" — просто задача
-    if text.lower().startswith("добавь задачу"):
-        task_text = re.sub(r'^добавь\s*задачу\s*', '', text, flags=re.IGNORECASE)
+    # 2. Если есть "добавь задачу" — просто задача
+    if "добавь задачу" in text.lower():
+        task_text = re.sub(r'добавь\s*задачу\s*', '', text, flags=re.IGNORECASE)
         save_task_to_db(task_text)
-        await message.answer(f"✅ Задача добавлена!\n📝 {task_text}")
+        await message.answer(f"✅ Задача добавлена!\n📝 {task_text}", reply_markup=get_main_keyboard())
         return
     
-    # 3. ВСЁ ОСТАЛЬНОЕ — ответ через DeepSeek
+    # 3. Если есть "удали задачу" — удаляем по тексту
+    if "удали задачу" in text.lower():
+        task_text = re.sub(r'удали\s*задачу\s*', '', text, flags=re.IGNORECASE)
+        conn = sqlite3.connect('tasks.db')
+        cur = conn.cursor()
+        cur.execute("DELETE FROM tasks WHERE text LIKE ?", (f"%{task_text}%",))
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        await message.answer(f"🗑️ Удалено задач: {deleted}, содержащих: {task_text}", reply_markup=get_main_keyboard())
+        return
+    
+    # 4. Если есть время в тексте — предлагаем добавить с напоминанием
+    remind_time = parse_time_from_text(text)
+    if remind_time:
+        task_text = text
+        task_text = re.sub(r'\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
+        task_text = re.sub(r'\s*через\s*\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', task_text)
+        task_text = re.sub(r'\s*завтра\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
+        task_text = task_text.strip()
+        
+        keyboard = get_task_confirmation_keyboard(task_text, remind_time)
+        await message.answer(
+            f"📝 Задача: {task_text}\n⏰ Напоминание в {remind_time.strftime('%H:%M')}\n\nДобавить?",
+            reply_markup=keyboard
+        )
+        return
+    
+    # 5. ВСЁ ОСТАЛЬНОЕ — ответ через DeepSeek
     await message.answer("🤔 Думаю...")
     try:
         answer = ask_deepseek(text)
-        await message.answer(answer)
+        await message.answer(answer, reply_markup=get_main_keyboard())
     except Exception as e:
-        await message.answer(f"⚠️ Ошибка: {str(e)}")
+        await message.answer(f"⚠️ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
 # ===== ФОН ПРОВЕРКА НАПОМИНАНИЙ =====
 async def check_reminders():
@@ -286,7 +410,7 @@ async def check_reminders():
 # ===== ЗАПУСК =====
 async def main():
     init_db()
-    print("✅ Бот запущен с умным распознаванием и московским временем!")
+    print("✅ Бот запущен с умным распознаванием и быстрыми кнопками!")
     print(f"👥 Разрешённые пользователи: {ALLOWED_USERS}")
     asyncio.create_task(check_reminders())
     await dp.start_polling(bot)
