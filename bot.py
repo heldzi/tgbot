@@ -328,7 +328,7 @@ async def clear_history(message: types.Message):
     else:
         await message.answer("📭 История и так пуста.", reply_markup=get_main_keyboard())
 
-# ===== НОВАЯ ЛОГИКА УДАЛЕНИЯ ВРЕМЕНИ (ПРОСТО И НАДЁЖНО) =====
+# ===== НОВАЯ, БЛЯТЬ, ЛОГИКА УДАЛЕНИЯ ВРЕМЕНИ =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -343,9 +343,9 @@ async def smart_handler(message: types.Message):
     
     # 1. "напомни" — задача с таймером
     if text.lower().startswith("напомни"):
-        # Убираем "напомни" и "мне"
-        clean_text = re.sub(r'^напомни\s+', '', text, flags=re.IGNORECASE)
-        clean_text = re.sub(r'^мне\s+', '', clean_text, flags=re.IGNORECASE)
+        # Убираем "напомни" и "мне" из начала
+        clean_text = re.sub(r'^напомни\s+мне\s+', '', text, flags=re.IGNORECASE)
+        clean_text = re.sub(r'^напомни\s+', '', clean_text, flags=re.IGNORECASE)
         
         # Находим время
         remind_time = parse_time_from_text(clean_text)
@@ -353,13 +353,13 @@ async def smart_handler(message: types.Message):
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
         
-        # Удаляем ВСЁ, что похоже на время (просто режем регуляркой)
-        # Сначала удаляем "через X минут"
+        # Удаляем ВСЁ, что похоже на время
+        # Сначала убираем "через X минут/часов"
         task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', clean_text, flags=re.IGNORECASE)
-        # Потом удаляем "в 15:30"
-        task_text = re.sub(r'в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
-        # Потом удаляем "завтра в 15:30"
-        task_text = re.sub(r'завтра\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text, flags=re.IGNORECASE)
+        # Потом "в 15:30"
+        task_text = re.sub(r'в\s+\d{1,2}[:.-]\d{2}\s*', '', task_text)
+        # Потом "завтра в 15:30"
+        task_text = re.sub(r'завтра\s+в\s+\d{1,2}[:.-]\d{2}\s*', '', task_text, flags=re.IGNORECASE)
         # Убираем лишние пробелы
         task_text = task_text.strip()
         
@@ -404,8 +404,8 @@ async def smart_handler(message: types.Message):
     if remind_time:
         task_text = text
         task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)\s*', '', task_text, flags=re.IGNORECASE)
-        task_text = re.sub(r'в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text)
-        task_text = re.sub(r'завтра\s*в\s*\d{1,2}[:.-]\d{2}\s*', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'в\s+\d{1,2}[:.-]\d{2}\s*', '', task_text)
+        task_text = re.sub(r'завтра\s+в\s+\d{1,2}[:.-]\d{2}\s*', '', task_text, flags=re.IGNORECASE)
         task_text = task_text.strip()
         if not task_text:
             await message.answer("❌ Я не понял, что именно нужно сделать.")
