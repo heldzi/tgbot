@@ -4,6 +4,7 @@ import requests
 import asyncio
 import datetime
 import re
+import json
 from dateutil.relativedelta import relativedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -11,6 +12,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeybo
 from dotenv import load_dotenv
 import pytz
 from aiohttp import web
+from playwright.async_api import async_playwright
 
 load_dotenv()
 
@@ -139,7 +141,7 @@ def ask_deepseek(question, user_id):
     }
     full_prompt = f"{context}{question}"
     data = {
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
         "messages": [{"role": "user", "content": full_prompt}],
         "max_tokens": 500
     }
@@ -200,12 +202,11 @@ def parse_amount_and_currency(text):
 
     return None
 
-def get_orienbank_rate(amount_rub=1000):
+def get_orienbank_rate_fast(amount_rub=1000):
     """
-    Запрашивает курс Ориёнбонка (RUB -> EUR) через API MultiTransfer.
+    Быстрый способ: прямой POST-запрос через requests (с прогревом кук).
     Возвращает словарь {rate, amount_rub, amount_eur} при успехе,
-    либо {"error": "текст с описанием проблемы"} при неудаче —
-    так проще отлаживаться прямо из Telegram, без доступа к логам Render.
+    либо {"error": "..."} при неудаче.
     """
     payload = {
         "countryCode": "TJK",
@@ -228,9 +229,6 @@ def get_orienbank_rate(amount_rub=1000):
     }
     try:
         session = requests.Session()
-        # Сначала обычный GET на страницу сайта - многие API за антибот-защитой
-        # (WAF/Cloudflare и т.п.) требуют куки, выданные при заходе на сайт,
-        # и без них отдают 400/403 на прямой POST в API.
         try:
             session.get(
                 "https://multitransfer.ru/transfer/tajikistan",
@@ -238,7 +236,7 @@ def get_orienbank_rate(amount_rub=1000):
                 timeout=15
             )
         except Exception:
-            pass  # если прогрев не удался - всё равно пробуем POST дальше
+            pass
 
         response = session.post(MULTITRANSFER_COMMISSIONS_URL, json=payload, headers=api_headers, timeout=15)
         if response.status_code != 200:
@@ -254,8 +252,96 @@ def get_orienbank_rate(amount_rub=1000):
             "amount_eur": float(money["withdrawMoney"]["amount"])
         }
     except Exception as e:
-        print(f"Ошибка при получении курса Ориёнбонка: {e}")
+        print(f"Ошибка (fast) при получении курса Ориёнбонка: {e}")
         return {"error": f"Исключение: {e}"}
+
+
+async def get_orienbank_rate_playwright(amount_rub=1000):
+    """
+    Медленный, но более надёжный способ: открываем настоящий headless-Chromium,
+    заходим на страницу сайта (получаем реальную сессию/куки/JS-окружение),
+    а сам запрос к их API делаем изнутри уже загруженной страницы через
+    fetch() - выполняется в контексте настоящего браузера, что должно
+    проходить антибот-защиту, которая блокирует "голые" запросы через requests.
+    """
+    payload = {
+        "countryCode": "TJK",
+        "money": {
+            "acceptedMoney": {"amount": amount_rub, "currencyCode": "RUB"},
+            "withdrawMoney": {"currencyCode": "EUR"}
+        },
+        "range": "ALL_PLUS_LIMITS"
+    }
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
+            )
+            try:
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                    locale="ru-RU"
+                )
+                page = await context.new_page()
+                await page.goto(
+                    "https://multitransfer.ru/transfer/tajikistan",
+                    wait_until="networkidle",
+                    timeout=30000
+                )
+
+                result = await page.evaluate(
+                    """
+                    async (payload) => {
+                        const res = await fetch("https://api.multitransfer.ru/anonymous/multi/multitransfer-fee-calc/v3/commissions", {
+                            method: "POST",
+                            headers: {"Content-Type": "application/json"},
+                            body: JSON.stringify(payload)
+                        });
+                        const text = await res.text();
+                        return {status: res.status, body: text};
+                    }
+                    """,
+                    payload
+                )
+            finally:
+                await browser.close()
+
+        if result["status"] != 200:
+            return {"error": f"HTTP {result['status']} (playwright): {result['body'][:300]}"}
+
+        data = json.loads(result["body"])
+        commission = _find_orienbank_commission(data)
+        if not commission:
+            return {"error": f"Ориёнбонк не найден (playwright). Ответ: {result['body'][:300]}"}
+        money = commission["money"]
+        return {
+            "rate": float(money["rate"]),
+            "amount_rub": float(money["acceptedMoney"]["amount"]),
+            "amount_eur": float(money["withdrawMoney"]["amount"])
+        }
+    except Exception as e:
+        print(f"Ошибка (playwright) при получении курса Ориёнбонка: {e}")
+        return {"error": f"Исключение (playwright): {e}"}
+
+
+async def get_orienbank_rate(amount_rub=1000):
+    """
+    Общая точка входа: сначала пробуем быстрый способ (requests),
+    если он падает с ошибкой - пробуем через Playwright.
+    """
+    loop = asyncio.get_event_loop()
+    fast_result = await loop.run_in_executor(None, get_orienbank_rate_fast, amount_rub)
+    if fast_result and "error" not in fast_result:
+        return fast_result
+
+    print(f"Быстрый способ не сработал ({fast_result.get('error') if fast_result else '?'}), пробуем Playwright...")
+    playwright_result = await get_orienbank_rate_playwright(amount_rub)
+    if playwright_result and "error" not in playwright_result:
+        return playwright_result
+
+    # Оба способа не сработали - возвращаем ошибку от Playwright (он последний пробовал)
+    return playwright_result
 
 def save_task_to_db(text, remind_time=None):
     conn = sqlite3.connect('tasks.db')
@@ -349,7 +435,7 @@ async def kurs_button(message: types.Message):
         await message.answer("⛔ Доступ запрещён.")
         return
 
-    result = get_orienbank_rate(amount_rub=1000)
+    result = await get_orienbank_rate(amount_rub=1000)
 
     if result and "error" not in result:
         rate_line = f"📊 Текущий курс: 1 EUR = {result['rate']:.2f} RUB\n\n"
@@ -484,7 +570,7 @@ async def kurs_command(message: types.Message):
         await message.answer("⛔ Доступ запрещён.")
         return
 
-    result = get_orienbank_rate(amount_rub=1000)
+    result = await get_orienbank_rate(amount_rub=1000)
     if not result or "error" in result:
         error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
         await message.answer(f"❌ Не удалось получить курс.\n\nДетали: {error_text}", reply_markup=get_main_keyboard())
@@ -572,7 +658,7 @@ async def smart_handler(message: types.Message):
 
             waiting_for_conversion.discard(user_id)
             amount, currency = parsed
-            result = get_orienbank_rate(amount_rub=amount if currency == "RUB" else 1000)
+            result = await get_orienbank_rate(amount_rub=amount if currency == "RUB" else 1000)
             if not result or "error" in result:
                 error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
                 await message.answer(f"❌ Не удалось получить курс.\n\nДетали: {error_text}", reply_markup=get_main_keyboard())
