@@ -151,7 +151,7 @@ def ask_deepseek(question, user_id):
             add_to_history(user_id, "assistant", answer)
             return answer
         else:
-            return f"❌ Ошибка API: {response.status_code}"
+            return f"❌ Ошибка API: {response.status_code}\nДетали: {response.text[:300]}"
     except Exception as e:
         return f"❌ Ошибка: {str(e)}"
 
@@ -215,15 +215,32 @@ def get_orienbank_rate(amount_rub=1000):
         },
         "range": "ALL_PLUS_LIMITS"
     }
-    headers = {
+    common_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    api_headers = {
+        **common_headers,
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
         "Origin": "https://multitransfer.ru",
         "Referer": "https://multitransfer.ru/transfer/tajikistan"
     }
     try:
-        response = requests.post(MULTITRANSFER_COMMISSIONS_URL, json=payload, headers=headers, timeout=15)
+        session = requests.Session()
+        # Сначала обычный GET на страницу сайта - многие API за антибот-защитой
+        # (WAF/Cloudflare и т.п.) требуют куки, выданные при заходе на сайт,
+        # и без них отдают 400/403 на прямой POST в API.
+        try:
+            session.get(
+                "https://multitransfer.ru/transfer/tajikistan",
+                headers=common_headers,
+                timeout=15
+            )
+        except Exception:
+            pass  # если прогрев не удался - всё равно пробуем POST дальше
+
+        response = session.post(MULTITRANSFER_COMMISSIONS_URL, json=payload, headers=api_headers, timeout=15)
         if response.status_code != 200:
             return {"error": f"HTTP {response.status_code}: {response.text[:300]}"}
         data = response.json()
@@ -540,20 +557,20 @@ async def smart_handler(message: types.Message):
 
     # ===== ОЖИДАЕМ СУММУ ДЛЯ КОНВЕРТАЦИИ ПОСЛЕ КНОПКИ "💱 Курс" =====
     if user_id in waiting_for_conversion:
-        waiting_for_conversion.discard(user_id)
-
         if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс"]:
-            # Пользователь передумал и нажал другую кнопку/команду - просто пропускаем ожидание конвертации
-            pass
+            # Пользователь передумал и нажал другую кнопку/команду - выходим из режима ожидания
+            waiting_for_conversion.discard(user_id)
         else:
             parsed = parse_amount_and_currency(text)
             if not parsed:
+                # Не сбрасываем ожидание - даём попробовать ещё раз, не заставляя жать кнопку заново
                 await message.answer(
                     "❌ Не понял сумму. Напишите, например: 5000 руб или 100 евро",
                     reply_markup=get_main_keyboard()
                 )
                 return
 
+            waiting_for_conversion.discard(user_id)
             amount, currency = parsed
             result = get_orienbank_rate(amount_rub=amount if currency == "RUB" else 1000)
             if not result or "error" in result:
