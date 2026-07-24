@@ -274,13 +274,46 @@ async def get_orienbank_rate_playwright(amount_rub=1000):
             browser = await p.chromium.launch(
                 headless=True,
                 channel="chromium",
-                args=["--no-sandbox", "--disable-dev-shm-usage"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--disable-extensions",
+                    "--disable-background-networking",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-breakpad",
+                    "--disable-component-extensions-with-background-pages",
+                    "--disable-default-apps",
+                    "--disable-sync",
+                    "--disable-translate",
+                    "--metrics-recording-only",
+                    "--mute-audio",
+                    "--no-first-run",
+                    "--safebrowsing-disable-auto-update",
+                    "--js-flags=--max-old-space-size=128",
+                    "--single-process"
+                ]
             )
             try:
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-                    locale="ru-RU"
+                    locale="ru-RU",
+                    viewport={"width": 800, "height": 600}
                 )
+
+                # Блокируем загрузку картинок/шрифтов/стилей/медиа - нам нужен
+                # только DOM и JS-логика калькулятора, визуал не нужен вообще.
+                # Это заметно снижает память и сетевой трафик браузера.
+                async def _block_heavy_resources(route):
+                    if route.request.resource_type in ("image", "font", "media", "stylesheet"):
+                        await route.abort()
+                    else:
+                        await route.continue_()
+
+                await context.route("**/*", _block_heavy_resources)
+
                 page = await context.new_page()
                 await page.goto(
                     "https://multitransfer.ru/transfer/tajikistan",
@@ -356,6 +389,10 @@ async def get_orienbank_rate(amount_rub=1000):
     """
     Общая точка входа: сначала пробуем быстрый способ (requests),
     если он падает с ошибкой - пробуем через Playwright.
+    Playwright обёрнут жёстким таймаутом в 60 сек: если он где-то
+    зависнет (например, headless-браузеру не хватает памяти/системных
+    библиотек на бесплатном тарифе Render), это не повесит бота навсегда,
+    а вернёт понятную ошибку через минуту.
     """
     loop = asyncio.get_event_loop()
     fast_result = await loop.run_in_executor(None, get_orienbank_rate_fast, amount_rub)
@@ -363,7 +400,11 @@ async def get_orienbank_rate(amount_rub=1000):
         return fast_result
 
     print(f"Быстрый способ не сработал ({fast_result.get('error') if fast_result else '?'}), пробуем Playwright...")
-    playwright_result = await get_orienbank_rate_playwright(amount_rub)
+    try:
+        playwright_result = await asyncio.wait_for(get_orienbank_rate_playwright(amount_rub), timeout=60)
+    except asyncio.TimeoutError:
+        return {"error": "Playwright завис и не ответил за 60 сек (похоже на нехватку памяти/ресурсов на сервере)."}
+
     if playwright_result and "error" not in playwright_result:
         return playwright_result
 
