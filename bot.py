@@ -289,7 +289,28 @@ async def get_orienbank_rate_playwright(amount_rub=1000):
                 )
 
                 # Выбираем валюту получения EUR (кликаем по кнопке-переключателю)
-                await page.click(EUR_SELECTOR)
+                try:
+                    await page.click(EUR_SELECTOR, timeout=15000)
+                except Exception:
+                    # Элемент не нашёлся - собираем диагностику: что реально
+                    # видит браузер на странице (заголовок, URL, видимый текст).
+                    # Это поможет понять, показывают ли нам капчу/заглушку/другой
+                    # дизайн вместо обычного калькулятора.
+                    title = await page.title()
+                    current_url = page.url
+                    try:
+                        body_text = await page.locator("body").inner_text(timeout=5000)
+                    except Exception:
+                        body_text = "(не удалось прочитать текст страницы)"
+                    return {
+                        "error": (
+                            f"Кнопка EUR не найдена за 15 сек.\n"
+                            f"URL: {current_url}\n"
+                            f"Title: {title}\n"
+                            f"Текст страницы (первые 500 симв.): {body_text[:500]}"
+                        )
+                    }
+
                 await page.wait_for_timeout(1000)
 
                 # Вводим сумму в рублях и ловим ответ их API на этот ввод
