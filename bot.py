@@ -203,7 +203,9 @@ def parse_amount_and_currency(text):
 def get_orienbank_rate(amount_rub=1000):
     """
     Запрашивает курс Ориёнбонка (RUB -> EUR) через API MultiTransfer.
-    Возвращает словарь {rate, amount_rub, amount_eur} либо None при ошибке.
+    Возвращает словарь {rate, amount_rub, amount_eur} при успехе,
+    либо {"error": "текст с описанием проблемы"} при неудаче —
+    так проще отлаживаться прямо из Telegram, без доступа к логам Render.
     """
     payload = {
         "countryCode": "TJK",
@@ -215,16 +217,19 @@ def get_orienbank_rate(amount_rub=1000):
     }
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0"
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Origin": "https://multitransfer.ru",
+        "Referer": "https://multitransfer.ru/transfer/tajikistan"
     }
     try:
         response = requests.post(MULTITRANSFER_COMMISSIONS_URL, json=payload, headers=headers, timeout=15)
         if response.status_code != 200:
-            return None
+            return {"error": f"HTTP {response.status_code}: {response.text[:300]}"}
         data = response.json()
         commission = _find_orienbank_commission(data)
         if not commission:
-            return None
+            return {"error": f"Ориёнбонк не найден в ответе. Сырой ответ: {str(data)[:300]}"}
         money = commission["money"]
         return {
             "rate": float(money["rate"]),
@@ -233,7 +238,7 @@ def get_orienbank_rate(amount_rub=1000):
         }
     except Exception as e:
         print(f"Ошибка при получении курса Ориёнбонка: {e}")
-        return None
+        return {"error": f"Исключение: {e}"}
 
 def save_task_to_db(text, remind_time=None):
     conn = sqlite3.connect('tasks.db')
@@ -326,9 +331,19 @@ async def kurs_button(message: types.Message):
     if not is_allowed(message.from_user.id):
         await message.answer("⛔ Доступ запрещён.")
         return
+
+    result = get_orienbank_rate(amount_rub=1000)
+
+    if result and "error" not in result:
+        rate_line = f"📊 Текущий курс: 1 EUR = {result['rate']:.2f} RUB\n\n"
+    else:
+        error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
+        rate_line = f"⚠️ Не удалось получить текущий курс (детали: {error_text})\n\n"
+
     waiting_for_conversion.add(message.from_user.id)
     await message.answer(
-        "💱 Введите сумму для конвертации (Ориёнбонк, RUB ⇄ EUR).\n"
+        f"💱 {rate_line}"
+        "Введите сумму для конвертации (Ориёнбонк, RUB ⇄ EUR).\n"
         "Например: 5000 руб или 100 евро",
         reply_markup=get_main_keyboard()
     )
@@ -453,8 +468,9 @@ async def kurs_command(message: types.Message):
         return
 
     result = get_orienbank_rate(amount_rub=1000)
-    if not result:
-        await message.answer("❌ Не удалось получить курс. Попробуйте позже.", reply_markup=get_main_keyboard())
+    if not result or "error" in result:
+        error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
+        await message.answer(f"❌ Не удалось получить курс.\n\nДетали: {error_text}", reply_markup=get_main_keyboard())
         return
 
     await message.answer(
@@ -540,8 +556,9 @@ async def smart_handler(message: types.Message):
 
             amount, currency = parsed
             result = get_orienbank_rate(amount_rub=amount if currency == "RUB" else 1000)
-            if not result:
-                await message.answer("❌ Не удалось получить курс. Попробуйте позже.", reply_markup=get_main_keyboard())
+            if not result or "error" in result:
+                error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
+                await message.answer(f"❌ Не удалось получить курс.\n\nДетали: {error_text}", reply_markup=get_main_keyboard())
                 return
 
             rate = result["rate"]  # RUB за 1 EUR
