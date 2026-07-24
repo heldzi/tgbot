@@ -288,9 +288,15 @@ async def get_orienbank_rate_playwright(amount_rub=1000):
                     timeout=30000
                 )
 
+                # На слабом CPU headless-инстанса JS-гидратация (когда React
+                # навешивает реальные обработчики/data-testid на уже
+                # отрисованный сервером HTML) может занимать заметно дольше,
+                # чем networkidle. Ждём отдельно появления самого элемента,
+                # а не полагаемся только на networkidle.
                 # Выбираем валюту получения EUR (кликаем по кнопке-переключателю)
                 try:
-                    await page.click(EUR_SELECTOR, timeout=15000)
+                    await page.wait_for_selector(EUR_SELECTOR, state="visible", timeout=30000)
+                    await page.click(EUR_SELECTOR, timeout=10000)
                 except Exception:
                     # Элемент не нашёлся - собираем диагностику: что реально
                     # видит браузер на странице (заголовок, URL, видимый текст).
@@ -304,7 +310,7 @@ async def get_orienbank_rate_playwright(amount_rub=1000):
                         body_text = "(не удалось прочитать текст страницы)"
                     return {
                         "error": (
-                            f"Кнопка EUR не найдена за 15 сек.\n"
+                            f"Кнопка EUR не найдена за 30 сек.\n"
                             f"URL: {current_url}\n"
                             f"Title: {title}\n"
                             f"Текст страницы (первые 500 симв.): {body_text[:500]}"
