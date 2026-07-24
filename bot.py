@@ -96,7 +96,9 @@ def parse_time_from_text(text):
             delta = relativedelta(minutes=amount)
         return now + delta
     
-    match = re.search(r'в\s*(\d{1,2})[:.-](\d{2})', text)
+    # ===== НОВАЯ УНИВЕРСАЛЬНАЯ РЕГУЛЯРКА =====
+    # Находит время в формате 15:00 или 15-00
+    match = re.search(r'(\d{1,2})[:.-](\d{2})', text)
     if match:
         hour = int(match.group(1))
         minute = int(match.group(2))
@@ -114,15 +116,6 @@ def parse_time_from_text(text):
         return dt
     
     match = re.search(r'сегодня\s+в\s*(\d{1,2})[:.-](\d{2})', text_lower)
-    if match:
-        hour = int(match.group(1))
-        minute = int(match.group(2))
-        dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if dt < now:
-            dt += datetime.timedelta(days=1)
-        return dt
-    
-    match = re.search(r'в\s*(\d{1,2})[:.-](\d{2})\s+сегодня', text_lower)
     if match:
         hour = int(match.group(1))
         minute = int(match.group(2))
@@ -327,15 +320,12 @@ async def remind_command(message: types.Message):
         await message.answer("❌ Не понял время. Пример: /remind Купить молоко в 15:00")
         return
     
-    patterns = [
-        r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)',
-        r'в\s+\d{1,2}[:.-]\d{2}',
-        r'завтра\s+в\s+\d{1,2}[:.-]\d{2}'
-    ]
-    
-    task_text = text
-    for pattern in patterns:
-        task_text = re.sub(pattern, '', task_text, flags=re.IGNORECASE)
+    # Убираем время из текста (универсально)
+    task_text = re.sub(r'\d{1,2}[:.-]\d{2}', '', text)
+    task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', task_text, flags=re.IGNORECASE)
+    task_text = re.sub(r'завтра\s+в', '', task_text, flags=re.IGNORECASE)
+    task_text = re.sub(r'сегодня\s+в', '', task_text, flags=re.IGNORECASE)
+    task_text = re.sub(r'в', '', task_text)
     task_text = re.sub(r'\s+', ' ', task_text).strip()
     
     if not task_text:
@@ -396,7 +386,7 @@ async def clear_history(message: types.Message):
     else:
         await message.answer("📭 История и так пуста.", reply_markup=get_main_keyboard())
 
-# ===== УМНЫЙ ОБРАБОТЧИК (ПРОВЕРКА "НАПОМНИ" В САМОМ НАЧАЛЕ) =====
+# ===== УМНЫЙ ОБРАБОТЧИК (УНИВЕРСАЛЬНЫЙ) =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -406,7 +396,7 @@ async def smart_handler(message: types.Message):
     text = message.text.strip()
     user_id = message.from_user.id
     
-    # ===== СНАЧАЛА ПРОВЕРЯЕМ НА "НАПОМНИ" (ДАЖЕ ЕСЛИ ЭТО КНОПКА) =====
+    # ===== СНАЧАЛА ПРОВЕРЯЕМ НА "НАПОМНИ" =====
     if "напомни" in text.lower():
         clean_text = re.sub(r'^напомни\s+мне\s+', '', text, flags=re.IGNORECASE)
         clean_text = re.sub(r'^напомни\s+', '', clean_text, flags=re.IGNORECASE)
@@ -416,10 +406,12 @@ async def smart_handler(message: types.Message):
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
         
-        task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', clean_text, flags=re.IGNORECASE)
-        task_text = re.sub(r'в\s+\d{1,2}[:.-]\d{2}', '', task_text)
-        task_text = re.sub(r'завтра\s+в\s+\d{1,2}[:.-]\d{2}', '', task_text, flags=re.IGNORECASE)
-        task_text = re.sub(r'сегодня', '', task_text, flags=re.IGNORECASE)
+        # Удаляем время универсально
+        task_text = re.sub(r'\d{1,2}[:.-]\d{2}', '', clean_text)
+        task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'завтра\s+в', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'сегодня\s+в', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'в', '', task_text)
         task_text = re.sub(r'\s+', ' ', task_text).strip()
         
         if not task_text:
@@ -433,7 +425,7 @@ async def smart_handler(message: types.Message):
         )
         return
 
-    # ===== ИГНОРИРУЕМ КОМАНДЫ И КНОПКИ (ПОСЛЕ ПРОВЕРКИ НА "НАПОМНИ") =====
+    # ===== ИГНОР КНОПОК И КОМАНД =====
     if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить"]:
         return
 
@@ -463,10 +455,11 @@ async def smart_handler(message: types.Message):
 
     remind_time = parse_time_from_text(text)
     if remind_time:
-        task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', text, flags=re.IGNORECASE)
-        task_text = re.sub(r'в\s+\d{1,2}[:.-]\d{2}', '', task_text)
-        task_text = re.sub(r'завтра\s+в\s+\d{1,2}[:.-]\d{2}', '', task_text, flags=re.IGNORECASE)
-        task_text = re.sub(r'сегодня', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\d{1,2}[:.-]\d{2}', '', text)
+        task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'завтра\s+в', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'сегодня\s+в', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'в', '', task_text)
         task_text = re.sub(r'\s+', ' ', task_text).strip()
         
         if not task_text:
@@ -486,7 +479,6 @@ async def smart_handler(message: types.Message):
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
-# ===== ФОН ПРОВЕРКА НАПОМИНАНИЙ =====
 async def check_reminders():
     while True:
         try:
