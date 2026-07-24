@@ -382,9 +382,9 @@ async def clear_history(message: types.Message):
     else:
         await message.answer("📭 История и так пуста.", reply_markup=get_main_keyboard())
 
-# ===== ОБРАБОТЧИК ВСЕХ ОСТАЛЬНЫХ ТЕКСТОВЫХ СООБЩЕНИЙ (ТОЛЬКО ДЛЯ DeepSeek) =====
+# ===== УМНЫЙ ОБРАБОТЧИК (РАБОТАЕТ С "НАПОМНИ") =====
 @dp.message()
-async def deepseek_handler(message: types.Message):
+async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
         await message.answer("⛔ Доступ запрещён.")
         return
@@ -392,11 +392,83 @@ async def deepseek_handler(message: types.Message):
     text = message.text.strip()
     user_id = message.from_user.id
     
-    # Игнорируем команды и кнопки
     if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить"]:
         return
-    
-    # ВСЁ ОСТАЛЬНОЕ ОТПРАВЛЯЕМ В DeepSeek
+
+    # ===== ЛОГИКА "НАПОМНИ" (БЕЗ СЛЕША) =====
+    if "напомни" in text.lower():
+        # Убираем "напомни" и "мне" из начала
+        clean_text = re.sub(r'^напомни\s+мне\s+', '', text, flags=re.IGNORECASE)
+        clean_text = re.sub(r'^напомни\s+', '', clean_text, flags=re.IGNORECASE)
+        
+        # Находим время
+        remind_time = parse_time_from_text(clean_text)
+        if not remind_time:
+            await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
+            return
+
+        # УДАЛЯЕМ ИЗ ТЕКСТА ВСЁ, ЧТО СВЯЗАНО С ВРЕМЕНЕМ
+        task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', clean_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'в\s+\d{1,2}[:.-]\d{2}', '', task_text)
+        task_text = re.sub(r'завтра\s+в\s+\d{1,2}[:.-]\d{2}', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\s+', ' ', task_text).strip()
+        
+        if not task_text:
+            await message.answer("❌ Я не понял, что именно нужно сделать. Напиши задачу.")
+            return
+        
+        keyboard = get_task_confirmation_keyboard(task_text, remind_time)
+        await message.answer(
+            f"📝 Задача: {task_text}\n⏰ Напоминание в {remind_time.strftime('%H:%M')}\n\nДобавить?",
+            reply_markup=keyboard
+        )
+        return
+
+    # ===== ЛОГИКА "ДОБАВЬ ЗАДАЧУ" =====
+    if "добавь задачу" in text.lower():
+        task_text = re.sub(r'добавь\s*задачу\s*', '', text, flags=re.IGNORECASE)
+        if not task_text:
+            await message.answer("❌ Напиши, что нужно добавить.")
+            return
+        save_task_to_db(task_text)
+        await message.answer(f"✅ Задача добавлена!\n📝 {task_text}", reply_markup=get_main_keyboard())
+        return
+
+    # ===== ЛОГИКА "УДАЛИ ЗАДАЧУ" =====
+    if "удали задачу" in text.lower():
+        task_text = re.sub(r'удали\s*задачу\s*', '', text, flags=re.IGNORECASE)
+        if not task_text:
+            await message.answer("❌ Напиши, что нужно удалить.")
+            return
+        conn = sqlite3.connect('tasks.db')
+        cur = conn.cursor()
+        cur.execute("DELETE FROM tasks WHERE text LIKE ?", (f"%{task_text}%",))
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        await message.answer(f"🗑️ Удалено задач: {deleted}, содержащих: {task_text}", reply_markup=get_main_keyboard())
+        return
+
+    # ===== ЕСЛИ В ТЕКСТЕ ЕСТЬ ВРЕМЯ (БЕЗ "НАПОМНИ") =====
+    remind_time = parse_time_from_text(text)
+    if remind_time:
+        task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', text, flags=re.IGNORECASE)
+        task_text = re.sub(r'в\s+\d{1,2}[:.-]\d{2}', '', task_text)
+        task_text = re.sub(r'завтра\s+в\s+\d{1,2}[:.-]\d{2}', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\s+', ' ', task_text).strip()
+        
+        if not task_text:
+            await message.answer("❌ Я не понял, что именно нужно сделать.")
+            return
+        
+        keyboard = get_task_confirmation_keyboard(task_text, remind_time)
+        await message.answer(
+            f"📝 Задача: {task_text}\n⏰ Напоминание в {remind_time.strftime('%H:%M')}\n\nДобавить?",
+            reply_markup=keyboard
+        )
+        return
+
+    # ===== ВСЁ ОСТАЛЬНОЕ — ОТВЕТ ЧЕРЕЗ DeepSeek =====
     try:
         answer = ask_deepseek(text, user_id)
         await message.answer(answer, reply_markup=get_main_keyboard())
