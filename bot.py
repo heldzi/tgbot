@@ -26,7 +26,7 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 def get_moscow_now():
     return datetime.datetime.now(MOSCOW_TZ)
 
-ALLOWED_USERS = [283805448]
+ALLOWED_USERS = [283805448]  # ТВОЙ ID
 
 def is_allowed(user_id):
     return user_id in ALLOWED_USERS
@@ -175,6 +175,7 @@ async def start_web():
     await site.start()
     print("🌐 Веб-сервер запущен на порту 10000")
 
+# ===== ОБРАБОТЧИКИ КНОПОК =====
 @dp.message(lambda message: message.text == "📝 Мои задачи")
 async def show_tasks_button(message: types.Message):
     await list_tasks(message)
@@ -223,6 +224,7 @@ async def remind_button(message: types.Message):
         reply_markup=get_main_keyboard()
     )
 
+# ===== КОЛБЭКИ =====
 @dp.callback_query(lambda c: c.data and c.data.startswith("del_task_"))
 async def delete_task_by_callback(callback: types.CallbackQuery):
     task_id = int(callback.data.split("_")[2])
@@ -260,6 +262,7 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.message.edit_text(f"✅ Задача добавлена!\n📝 {task_text}")
         await callback.answer()
 
+# ===== КОМАНДЫ =====
 @dp.message(Command("start"))
 async def start(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -328,7 +331,7 @@ async def clear_history(message: types.Message):
     else:
         await message.answer("📭 История и так пуста.", reply_markup=get_main_keyboard())
 
-# ===== САМАЯ ПРОСТАЯ И РАБОЧАЯ ЛОГИКА =====
+# ===== УМНЫЙ ОБРАБОТЧИК (ГЛАВНАЯ ЛОГИКА) =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -338,45 +341,39 @@ async def smart_handler(message: types.Message):
     text = message.text.strip()
     user_id = message.from_user.id
     
+    # --- ИГНОРИРУЕМ КОМАНДЫ И КНОПКИ ---
     if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить"]:
         return
-    
-    # 1. "напомни" — задача с таймером
+
+    # --- 1. ЛОГИКА "НАПОМНИ" (СТАРТУЕТ ПЕРВОЙ) ---
     if text.lower().startswith("напомни"):
-        # Убираем "напомни" и "мне"
+        # Убираем "напомни" и "мне" из начала
         clean_text = re.sub(r'^напомни\s+мне\s+', '', text, flags=re.IGNORECASE)
         clean_text = re.sub(r'^напомни\s+', '', clean_text, flags=re.IGNORECASE)
         
-        # Находим время
+        # Парсим время
         remind_time = parse_time_from_text(clean_text)
         if not remind_time:
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
-        
-        # Удаляем всё, что связано с временем (максимально просто)
+
+        # --- ЖЕСТКОЕ УДАЛЕНИЕ ВСЕГО, ЧТО СВЯЗАНО С ВРЕМЕНЕМ ---
+        # Просто вырезаем все стоп-слова и числа
         words = clean_text.split()
-        stop_words = {'через', 'в', 'завтра', 'минут', 'минуты', 'минуту', 'час', 'часа', 'часов'}
+        stop_words = {'через', 'в', 'завтра', 'минут', 'минуты', 'минуту', 'час', 'часа', 'часов', 'дня', 'дней', 'секунд'}
         task_words = []
         
         i = 0
         while i < len(words):
             word = words[i].lower()
-            # Если это слово-триггер — пропускаем его и следующее число
-            if word in stop_words:
+            # Если это стоп-слово или число, пропускаем
+            if word in stop_words or re.match(r'^\d+$', word) or re.match(r'^\d{1,2}[:.-]\d{2}$', word):
                 i += 1
-                # Пропускаем следующее число (если оно есть)
-                if i < len(words) and re.match(r'^\d+$', words[i]):
-                    i += 1
                 continue
-            # Пропускаем любые числа
+            # Пропускаем числа в любом виде
             if re.match(r'^\d+$', words[i]):
                 i += 1
                 continue
-            # Пропускаем время в формате 15:30
-            if re.match(r'^\d{1,2}[:.-]\d{2}$', words[i]):
-                i += 1
-                continue
-            # Остальное добавляем
             task_words.append(words[i])
             i += 1
         
@@ -392,8 +389,8 @@ async def smart_handler(message: types.Message):
             reply_markup=keyboard
         )
         return
-    
-    # 2. "добавь задачу"
+
+    # --- 2. ЛОГИКА "ДОБАВЬ ЗАДАЧУ" ---
     if "добавь задачу" in text.lower():
         task_text = re.sub(r'добавь\s*задачу\s*', '', text, flags=re.IGNORECASE)
         if not task_text:
@@ -402,8 +399,8 @@ async def smart_handler(message: types.Message):
         save_task_to_db(task_text)
         await message.answer(f"✅ Задача добавлена!\n📝 {task_text}", reply_markup=get_main_keyboard())
         return
-    
-    # 3. "удали задачу"
+
+    # --- 3. ЛОГИКА "УДАЛИ ЗАДАЧУ" ---
     if "удали задачу" in text.lower():
         task_text = re.sub(r'удали\s*задачу\s*', '', text, flags=re.IGNORECASE)
         if not task_text:
@@ -417,26 +414,18 @@ async def smart_handler(message: types.Message):
         conn.close()
         await message.answer(f"🗑️ Удалено задач: {deleted}, содержащих: {task_text}", reply_markup=get_main_keyboard())
         return
-    
-    # 4. Если есть время
+
+    # --- 4. ЕСЛИ В ТЕКСТЕ ЕСТЬ ВРЕМЯ (БЕЗ СЛОВА "НАПОМНИ") ---
     remind_time = parse_time_from_text(text)
     if remind_time:
         words = text.split()
-        stop_words = {'через', 'в', 'завтра', 'минут', 'минуты', 'минуту', 'час', 'часа', 'часов'}
+        stop_words = {'через', 'в', 'завтра', 'минут', 'минуты', 'минуту', 'час', 'часа', 'часов', 'дня', 'дней', 'секунд'}
         task_words = []
         
         i = 0
         while i < len(words):
             word = words[i].lower()
-            if word in stop_words:
-                i += 1
-                if i < len(words) and re.match(r'^\d+$', words[i]):
-                    i += 1
-                continue
-            if re.match(r'^\d+$', words[i]):
-                i += 1
-                continue
-            if re.match(r'^\d{1,2}[:.-]\d{2}$', words[i]):
+            if word in stop_words or re.match(r'^\d+$', word) or re.match(r'^\d{1,2}[:.-]\d{2}$', word):
                 i += 1
                 continue
             task_words.append(words[i])
@@ -446,20 +435,22 @@ async def smart_handler(message: types.Message):
         if not task_text:
             await message.answer("❌ Я не понял, что именно нужно сделать.")
             return
+        
         keyboard = get_task_confirmation_keyboard(task_text, remind_time)
         await message.answer(
             f"📝 Задача: {task_text}\n⏰ Напоминание в {remind_time.strftime('%H:%M')}\n\nДобавить?",
             reply_markup=keyboard
         )
         return
-    
-    # 5. ВСЁ ОСТАЛЬНОЕ — DeepSeek
+
+    # --- 5. ВСЁ ОСТАЛЬНОЕ — ОТВЕТ ЧЕРЕЗ DeepSeek ---
     try:
         answer = ask_deepseek(text, user_id)
         await message.answer(answer, reply_markup=get_main_keyboard())
     except Exception as e:
         await message.answer(f"⚠️ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
+# ===== ФОН ПРОВЕРКА НАПОМИНАНИЙ =====
 async def check_reminders():
     while True:
         try:
@@ -479,6 +470,7 @@ async def check_reminders():
             print(f"Ошибка в напоминаниях: {e}")
         await asyncio.sleep(60)
 
+# ===== ЗАПУСК =====
 async def main():
     init_db()
     print("✅ Бот запущен!")
