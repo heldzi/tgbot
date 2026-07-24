@@ -54,6 +54,25 @@ def add_to_history(user_id, role, content):
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# ===== NEW: хранилище задач, ожидающих подтверждения =====
+# Проблема была в том, что весь текст задачи + дата зашивались прямо
+# в callback_data кнопки. Telegram разрешает максимум 64 байта на
+# callback_data, а кириллица в UTF-8 — это 2 байта на символ, поэтому
+# любая задача длиннее нескольких слов ломала отправку клавиатуры
+# (Telegram отклонял запрос, aiogram молча логировал ошибку в консоль).
+# Теперь в callback_data передаём только короткий числовой id,
+# а сам текст задачи и время лежат здесь, в памяти.
+pending_tasks = {}
+_pending_id_counter = 0
+
+def register_pending_task(task_text, remind_time=None):
+    global _pending_id_counter
+    _pending_id_counter += 1
+    pending_id = _pending_id_counter
+    pending_tasks[pending_id] = (task_text, remind_time)
+    return pending_id
+
+
 def get_main_keyboard():
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
@@ -146,10 +165,13 @@ def save_task_to_db(text, remind_time=None):
     conn.close()
 
 def get_task_confirmation_keyboard(task_text, remind_time=None):
+    # NEW: callback_data теперь содержит только короткий id,
+    # а не сам текст задачи — так он никогда не превысит 64 байта.
+    pending_id = register_pending_task(task_text, remind_time)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Добавить", callback_data=f"add_task:{task_text}:{remind_time.strftime('%Y-%m-%d %H:%M') if remind_time else 'None'}"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_task")
+            InlineKeyboardButton(text="✅ Добавить", callback_data=f"add_task:{pending_id}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_task:{pending_id}")
         ]
     ])
     return keyboard
@@ -230,20 +252,29 @@ async def delete_task_by_callback(callback: types.CallbackQuery):
     conn.close()
     await callback.answer()
 
-@dp.callback_query()
+@dp.callback_query(lambda c: c.data and (c.data.startswith("add_task:") or c.data.startswith("cancel_task:")))
 async def handle_callback(callback: types.CallbackQuery):
     data = callback.data
-    if data == "cancel_task":
+    action, _, pending_id_str = data.partition(":")
+    try:
+        pending_id = int(pending_id_str)
+    except ValueError:
+        pending_id = None
+
+    if action == "cancel_task":
+        pending_tasks.pop(pending_id, None)
         await callback.message.edit_text("❌ Задача отменена.")
         await callback.answer()
         return
-    if data.startswith("add_task:"):
-        parts = data.split(":", 2)
-        task_text = parts[1]
-        remind_time_str = parts[2]
-        if remind_time_str != "None":
-            remind_time = datetime.datetime.strptime(remind_time_str, "%Y-%m-%d %H:%M")
-            remind_time = MOSCOW_TZ.localize(remind_time)
+
+    if action == "add_task":
+        pending = pending_tasks.pop(pending_id, None)
+        if pending is None:
+            await callback.message.edit_text("⚠️ Эта задача уже неактуальна, попробуйте создать её заново.")
+            await callback.answer()
+            return
+        task_text, remind_time = pending
+        if remind_time is not None:
             save_task_to_db(task_text, remind_time)
             await callback.message.edit_text(f"✅ Задача добавлена!\n📝 {task_text}\n⏰ Напоминание в {remind_time.strftime('%H:%M')}")
         else:
