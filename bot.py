@@ -33,6 +33,10 @@ def is_allowed(user_id):
 
 user_history = {}
 
+# Пользователи, которые только что нажали "💱 Курс" и должны прислать
+# следующим сообщением сумму (в рублях или евро) для конвертации.
+waiting_for_conversion = set()
+
 def get_context(user_id):
     if user_id not in user_history:
         return ""
@@ -82,7 +86,8 @@ def get_main_keyboard():
                 KeyboardButton(text="🗑 Удалить задачу")
             ],
             [
-                KeyboardButton(text="⏰ Напомнить")
+                KeyboardButton(text="⏰ Напомнить"),
+                KeyboardButton(text="💱 Курс")
             ]
         ],
         resize_keyboard=True,
@@ -149,6 +154,86 @@ def ask_deepseek(question, user_id):
             return f"❌ Ошибка API: {response.status_code}"
     except Exception as e:
         return f"❌ Ошибка: {str(e)}"
+
+# ===== Курс валют (MultiTransfer, Ориёнбонк, RUB -> EUR) =====
+MULTITRANSFER_COMMISSIONS_URL = "https://api.multitransfer.ru/anonymous/multi/multitransfer-fee-calc/v3/commissions"
+
+def _find_orienbank_commission(data):
+    """
+    Рекурсивно ищет в ответе API блок с nameCyrillic == "Ориёнбонк"
+    внутри любых вложенных списков "commissions". Структура верхнего
+    уровня ответа не полностью известна, поэтому обходим весь JSON,
+    а не полагаемся на конкретный путь вида data["commissions"][0].
+    """
+    if isinstance(data, dict):
+        if data.get("nameCyrillic") == "Ориёнбонк" and "money" in data:
+            return data
+        for value in data.values():
+            found = _find_orienbank_commission(value)
+            if found:
+                return found
+    elif isinstance(data, list):
+        for item in data:
+            found = _find_orienbank_commission(item)
+            if found:
+                return found
+    return None
+
+def parse_amount_and_currency(text):
+    """
+    Распознаёт сумму и валюту из свободного текста пользователя.
+    Примеры, которые понимает: "5000 руб", "5000р", "5000₽", "5000 rub",
+    "100 евро", "100 eur", "100€", "5000" (без валюты - будет None).
+    Возвращает (amount: float, currency: 'RUB'|'EUR') или None, если не распознал.
+    """
+    text = text.strip().lower().replace(",", ".")
+
+    match = re.search(r'(\d+(?:\.\d+)?)', text)
+    if not match:
+        return None
+    amount = float(match.group(1))
+
+    if any(kw in text for kw in ["eur", "евро", "€"]):
+        return amount, "EUR"
+    if any(kw in text for kw in ["rub", "руб", "₽", "р."]) or re.search(r'\d+\s*р\b', text):
+        return amount, "RUB"
+
+    return None
+
+def get_orienbank_rate(amount_rub=1000):
+    """
+    Запрашивает курс Ориёнбонка (RUB -> EUR) через API MultiTransfer.
+    Возвращает словарь {rate, amount_rub, amount_eur} либо None при ошибке.
+    """
+    payload = {
+        "countryCode": "TJK",
+        "money": {
+            "acceptedMoney": {"amount": amount_rub, "currencyCode": "RUB"},
+            "withdrawMoney": {"currencyCode": "EUR"}
+        },
+        "range": "ALL_PLUS_LIMITS"
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0"
+    }
+    try:
+        response = requests.post(MULTITRANSFER_COMMISSIONS_URL, json=payload, headers=headers, timeout=15)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        commission = _find_orienbank_commission(data)
+        if not commission:
+            return None
+        money = commission["money"]
+        return {
+            "rate": float(money["rate"]),
+            "amount_rub": float(money["acceptedMoney"]["amount"]),
+            "amount_eur": float(money["withdrawMoney"]["amount"])
+        }
+    except Exception as e:
+        print(f"Ошибка при получении курса Ориёнбонка: {e}")
+        return None
 
 def save_task_to_db(text, remind_time=None):
     conn = sqlite3.connect('tasks.db')
@@ -236,6 +321,18 @@ async def remind_button(message: types.Message):
         reply_markup=get_main_keyboard()
     )
 
+@dp.message(lambda message: message.text == "💱 Курс")
+async def kurs_button(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+    waiting_for_conversion.add(message.from_user.id)
+    await message.answer(
+        "💱 Введите сумму для конвертации (Ориёнбонк, RUB ⇄ EUR).\n"
+        "Например: 5000 руб или 100 евро",
+        reply_markup=get_main_keyboard()
+    )
+
 @dp.callback_query(lambda c: c.data and c.data.startswith("del_task_"))
 async def delete_task_by_callback(callback: types.CallbackQuery):
     task_id = int(callback.data.split("_")[2])
@@ -296,7 +393,8 @@ async def start(message: types.Message):
         "/remind задача в 15:00 — создаст напоминание\n"
         "/add задача — просто добавит задачу\n"
         "/tasks — показать все задачи\n"
-        "/del номер — удалить задачу по номеру\n\n"
+        "/del номер — удалить задачу по номеру\n"
+        "/kurs — курс Ориёнбонк RUB → EUR\n\n"
         "💬 Или просто напиши вопрос — я отвечу через DeepSeek!",
         reply_markup=get_main_keyboard()
     )
@@ -346,6 +444,24 @@ async def remind_command(message: types.Message):
     await message.answer(
         f"📝 Задача: {task_text}\n⏰ Напоминание в {remind_time.strftime('%H:%M')}\n\nДобавить?",
         reply_markup=keyboard
+    )
+
+@dp.message(Command("kurs"))
+async def kurs_command(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    result = get_orienbank_rate(amount_rub=1000)
+    if not result:
+        await message.answer("❌ Не удалось получить курс. Попробуйте позже.", reply_markup=get_main_keyboard())
+        return
+
+    await message.answer(
+        f"💱 Курс Ориёнбонк (RUB → EUR)\n\n"
+        f"1 EUR = {result['rate']:.2f} RUB\n"
+        f"{result['amount_rub']:.0f} RUB → {result['amount_eur']:.2f} EUR",
+        reply_markup=get_main_keyboard()
     )
 
 @dp.message(Command("tasks"))
@@ -406,6 +522,45 @@ async def smart_handler(message: types.Message):
     text = message.text.strip()
     user_id = message.from_user.id
 
+    # ===== ОЖИДАЕМ СУММУ ДЛЯ КОНВЕРТАЦИИ ПОСЛЕ КНОПКИ "💱 Курс" =====
+    if user_id in waiting_for_conversion:
+        waiting_for_conversion.discard(user_id)
+
+        if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс"]:
+            # Пользователь передумал и нажал другую кнопку/команду - просто пропускаем ожидание конвертации
+            pass
+        else:
+            parsed = parse_amount_and_currency(text)
+            if not parsed:
+                await message.answer(
+                    "❌ Не понял сумму. Напишите, например: 5000 руб или 100 евро",
+                    reply_markup=get_main_keyboard()
+                )
+                return
+
+            amount, currency = parsed
+            result = get_orienbank_rate(amount_rub=amount if currency == "RUB" else 1000)
+            if not result:
+                await message.answer("❌ Не удалось получить курс. Попробуйте позже.", reply_markup=get_main_keyboard())
+                return
+
+            rate = result["rate"]  # RUB за 1 EUR
+            if currency == "RUB":
+                converted = amount / rate
+                await message.answer(
+                    f"💱 {amount:.2f} RUB ≈ {converted:.2f} EUR\n"
+                    f"(курс Ориёнбонк: 1 EUR = {rate:.2f} RUB)",
+                    reply_markup=get_main_keyboard()
+                )
+            else:
+                converted = amount * rate
+                await message.answer(
+                    f"💱 {amount:.2f} EUR ≈ {converted:.2f} RUB\n"
+                    f"(курс Ориёнбонк: 1 EUR = {rate:.2f} RUB)",
+                    reply_markup=get_main_keyboard()
+                )
+            return
+
     # ===== ЕСЛИ В ТЕКСТЕ ЕСТЬ "НАПОМНИ" =====
     if "напомни" in text.lower():
         # Убираем слово "напомни"
@@ -441,7 +596,7 @@ async def smart_handler(message: types.Message):
         return
 
     # ===== ЕСЛИ ЭТО КОМАНДА ИЛИ КНОПКА — ИГНОРИРУЕМ =====
-    if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить"]:
+    if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс"]:
         return
 
     # ===== "ДОБАВЬ ЗАДАЧУ" =====
