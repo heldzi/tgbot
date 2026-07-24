@@ -258,20 +258,17 @@ def get_orienbank_rate_fast(amount_rub=1000):
 
 async def get_orienbank_rate_playwright(amount_rub=1000):
     """
-    Медленный, но более надёжный способ: открываем настоящий headless-Chromium,
-    заходим на страницу сайта (получаем реальную сессию/куки/JS-окружение),
-    а сам запрос к их API делаем изнутри уже загруженной страницы через
-    fetch() - выполняется в контексте настоящего браузера, что должно
-    проходить антибот-защиту, которая блокирует "голые" запросы через requests.
+    Более надёжный способ: открываем настоящий headless-Chromium, заходим на
+    страницу калькулятора и физически кликаем/печатаем как обычный пользователь
+    (жмём EUR, вводим сумму в поле), а не подделываем fetch() руками - так все
+    нужные токены/заголовки, которые генерирует их собственный JS, подставляются
+    сами. Сам ответ их API на этот ввод перехватываем через page.expect_response.
+    В ответе API уже содержится список ВСЕХ банков (включая Ориёнбонк) для
+    введённой суммы - переключать "способ перевода" в интерфейсе не нужно.
     """
-    payload = {
-        "countryCode": "TJK",
-        "money": {
-            "acceptedMoney": {"amount": amount_rub, "currencyCode": "RUB"},
-            "withdrawMoney": {"currencyCode": "EUR"}
-        },
-        "range": "ALL_PLUS_LIMITS"
-    }
+    EUR_SELECTOR = '[data-testid="transfer_widget_currency-list_EUR"]'
+    AMOUNT_INPUT_SELECTOR = 'input[name="amount"]'
+
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -291,30 +288,32 @@ async def get_orienbank_rate_playwright(amount_rub=1000):
                     timeout=30000
                 )
 
-                result = await page.evaluate(
-                    """
-                    async (payload) => {
-                        const res = await fetch("https://api.multitransfer.ru/anonymous/multi/multitransfer-fee-calc/v3/commissions", {
-                            method: "POST",
-                            headers: {"Content-Type": "application/json"},
-                            body: JSON.stringify(payload)
-                        });
-                        const text = await res.text();
-                        return {status: res.status, body: text};
-                    }
-                    """,
-                    payload
-                )
+                # Выбираем валюту получения EUR (кликаем по кнопке-переключателю)
+                await page.click(EUR_SELECTOR)
+                await page.wait_for_timeout(1000)
+
+                # Вводим сумму в рублях и ловим ответ их API на этот ввод
+                amount_input = page.locator(AMOUNT_INPUT_SELECTOR)
+                async with page.expect_response(
+                    lambda r: "multitransfer-fee-calc/v3/commissions" in r.url,
+                    timeout=15000
+                ) as response_info:
+                    await amount_input.click()
+                    await amount_input.fill(str(amount_rub))
+                    await amount_input.press("Tab")
+
+                response = await response_info.value
+                if response.status != 200:
+                    body = await response.text()
+                    return {"error": f"HTTP {response.status} (playwright): {body[:300]}"}
+
+                data = await response.json()
             finally:
                 await browser.close()
 
-        if result["status"] != 200:
-            return {"error": f"HTTP {result['status']} (playwright): {result['body'][:300]}"}
-
-        data = json.loads(result["body"])
         commission = _find_orienbank_commission(data)
         if not commission:
-            return {"error": f"Ориёнбонк не найден (playwright). Ответ: {result['body'][:300]}"}
+            return {"error": f"Ориёнбонк не найден (playwright). Ответ: {str(data)[:300]}"}
         money = commission["money"]
         return {
             "rate": float(money["rate"]),
