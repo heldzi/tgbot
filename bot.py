@@ -276,6 +276,7 @@ async def get_orienbank_rate_playwright(amount_rub=1000):
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
+                channel="chromium",
                 args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
             try:
