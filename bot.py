@@ -352,13 +352,20 @@ async def get_orienbank_rate_playwright(amount_rub=1000):
 
                 await page.wait_for_timeout(1000)
 
-                # Вводим сумму в рублях и ловим ответ их API на этот ввод
+                # Вводим сумму в рублях и ловим ответ их API на этот ввод.
+                # В поле по умолчанию уже может стоять похожая сумма (например
+                # 1000 руб) - если ввести то же самое число, React не увидит
+                # изменения и калькулятор не сделает новый запрос. Поэтому
+                # сначала сбрасываем поле на заведомо другое значение.
                 amount_input = page.locator(AMOUNT_INPUT_SELECTOR)
+                await amount_input.click()
+                await amount_input.fill("1")
+                await page.wait_for_timeout(500)
+
                 async with page.expect_response(
                     lambda r: "multitransfer-fee-calc/v3/commissions" in r.url,
                     timeout=15000
                 ) as response_info:
-                    await amount_input.click()
                     await amount_input.fill(str(amount_rub))
                     await amount_input.press("Tab")
 
