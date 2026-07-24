@@ -113,7 +113,6 @@ def parse_time_from_text(text):
         dt = dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
         return dt
     
-    # ===== НОВОЕ: "сегодня в 15:00" =====
     match = re.search(r'сегодня\s+в\s*(\d{1,2})[:.-](\d{2})', text_lower)
     if match:
         hour = int(match.group(1))
@@ -123,7 +122,6 @@ def parse_time_from_text(text):
             dt += datetime.timedelta(days=1)
         return dt
     
-    # ===== НОВОЕ: "в 15:00 сегодня" =====
     match = re.search(r'в\s*(\d{1,2})[:.-](\d{2})\s+сегодня', text_lower)
     if match:
         hour = int(match.group(1))
@@ -398,7 +396,7 @@ async def clear_history(message: types.Message):
     else:
         await message.answer("📭 История и так пуста.", reply_markup=get_main_keyboard())
 
-# ===== УМНЫЙ ОБРАБОТЧИК =====
+# ===== УМНЫЙ ОБРАБОТЧИК (ПРОВЕРКА "НАПОМНИ" В САМОМ НАЧАЛЕ) =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -408,10 +406,7 @@ async def smart_handler(message: types.Message):
     text = message.text.strip()
     user_id = message.from_user.id
     
-    if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить"]:
-        return
-
-    # ===== "НАПОМНИ" =====
+    # ===== СНАЧАЛА ПРОВЕРЯЕМ НА "НАПОМНИ" (ДАЖЕ ЕСЛИ ЭТО КНОПКА) =====
     if "напомни" in text.lower():
         clean_text = re.sub(r'^напомни\s+мне\s+', '', text, flags=re.IGNORECASE)
         clean_text = re.sub(r'^напомни\s+', '', clean_text, flags=re.IGNORECASE)
@@ -420,7 +415,7 @@ async def smart_handler(message: types.Message):
         if not remind_time:
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
-
+        
         task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', clean_text, flags=re.IGNORECASE)
         task_text = re.sub(r'в\s+\d{1,2}[:.-]\d{2}', '', task_text)
         task_text = re.sub(r'завтра\s+в\s+\d{1,2}[:.-]\d{2}', '', task_text, flags=re.IGNORECASE)
@@ -438,7 +433,11 @@ async def smart_handler(message: types.Message):
         )
         return
 
-    # ===== "ДОБАВЬ ЗАДАЧУ" =====
+    # ===== ИГНОРИРУЕМ КОМАНДЫ И КНОПКИ (ПОСЛЕ ПРОВЕРКИ НА "НАПОМНИ") =====
+    if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить"]:
+        return
+
+    # ===== ОСТАЛЬНАЯ ЛОГИКА =====
     if "добавь задачу" in text.lower():
         task_text = re.sub(r'добавь\s*задачу\s*', '', text, flags=re.IGNORECASE)
         if not task_text:
@@ -448,7 +447,6 @@ async def smart_handler(message: types.Message):
         await message.answer(f"✅ Задача добавлена!\n📝 {task_text}", reply_markup=get_main_keyboard())
         return
 
-    # ===== "УДАЛИ ЗАДАЧУ" =====
     if "удали задачу" in text.lower():
         task_text = re.sub(r'удали\s*задачу\s*', '', text, flags=re.IGNORECASE)
         if not task_text:
@@ -463,7 +461,6 @@ async def smart_handler(message: types.Message):
         await message.answer(f"🗑️ Удалено задач: {deleted}, содержащих: {task_text}", reply_markup=get_main_keyboard())
         return
 
-    # ===== ЕСЛИ ЕСТЬ ВРЕМЯ =====
     remind_time = parse_time_from_text(text)
     if remind_time:
         task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', text, flags=re.IGNORECASE)
@@ -483,7 +480,6 @@ async def smart_handler(message: types.Message):
         )
         return
 
-    # ===== ВСЁ ОСТАЛЬНОЕ — DEEPSEEK =====
     try:
         answer = ask_deepseek(text, user_id)
         await message.answer(answer, reply_markup=get_main_keyboard())
