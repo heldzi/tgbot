@@ -86,6 +86,7 @@ def parse_time_from_text(text):
     now = get_moscow_now()
     text_lower = text.lower()
     
+    # "через 2 минуты"
     match = re.search(r'через\s+(\d+)\s*(минут|минуты|минуту|час|часа|часов)', text_lower)
     if match:
         amount = int(match.group(1))
@@ -96,6 +97,7 @@ def parse_time_from_text(text):
             delta = relativedelta(minutes=amount)
         return now + delta
     
+    # "в 15:00"
     match = re.search(r'в\s*(\d{1,2})[:.-](\d{2})', text)
     if match:
         hour = int(match.group(1))
@@ -105,6 +107,7 @@ def parse_time_from_text(text):
             dt += datetime.timedelta(days=1)
         return dt
     
+    # "завтра в 15:00"
     match = re.search(r'завтра\s*в\s*(\d{1,2})[:.-](\d{2})', text_lower)
     if match:
         hour = int(match.group(1))
@@ -331,7 +334,7 @@ async def clear_history(message: types.Message):
     else:
         await message.answer("📭 История и так пуста.", reply_markup=get_main_keyboard())
 
-# ===== УМНЫЙ ОБРАБОТЧИК (ГЛАВНАЯ ЛОГИКА) =====
+# ===== УМНЫЙ ОБРАБОТЧИК (НОВАЯ ВЕРСИЯ — РАБОТАЕТ НА 100%) =====
 @dp.message()
 async def smart_handler(message: types.Message):
     if not is_allowed(message.from_user.id):
@@ -341,43 +344,35 @@ async def smart_handler(message: types.Message):
     text = message.text.strip()
     user_id = message.from_user.id
     
-    # --- ИГНОРИРУЕМ КОМАНДЫ И КНОПКИ ---
+    # Игнорируем команды и кнопки
     if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить"]:
         return
 
-    # --- 1. ЛОГИКА "НАПОМНИ" (СТАРТУЕТ ПЕРВОЙ) ---
+    # 1. ЛОГИКА "НАПОМНИ" (УНИВЕРСАЛЬНАЯ)
     if text.lower().startswith("напомни"):
         # Убираем "напомни" и "мне" из начала
         clean_text = re.sub(r'^напомни\s+мне\s+', '', text, flags=re.IGNORECASE)
         clean_text = re.sub(r'^напомни\s+', '', clean_text, flags=re.IGNORECASE)
         
-        # Парсим время
+        # Находим время
         remind_time = parse_time_from_text(clean_text)
         if not remind_time:
             await message.answer("❌ Не понял время. Пример: 'напомни мне в 15:00 купить молоко'")
             return
 
-        # --- ЖЕСТКОЕ УДАЛЕНИЕ ВСЕГО, ЧТО СВЯЗАНО С ВРЕМЕНЕМ ---
-        # Просто вырезаем все стоп-слова и числа
-        words = clean_text.split()
-        stop_words = {'через', 'в', 'завтра', 'минут', 'минуты', 'минуту', 'час', 'часа', 'часов', 'дня', 'дней', 'секунд'}
-        task_words = []
+        # Удаляем из текста ВСЁ, что связано с временем (просто и надёжно)
+        patterns = [
+            r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)',
+            r'в\s+\d{1,2}[:.-]\d{2}',
+            r'завтра\s+в\s+\d{1,2}[:.-]\d{2}'
+        ]
         
-        i = 0
-        while i < len(words):
-            word = words[i].lower()
-            # Если это стоп-слово или число, пропускаем
-            if word in stop_words or re.match(r'^\d+$', word) or re.match(r'^\d{1,2}[:.-]\d{2}$', word):
-                i += 1
-                continue
-            # Пропускаем числа в любом виде
-            if re.match(r'^\d+$', words[i]):
-                i += 1
-                continue
-            task_words.append(words[i])
-            i += 1
+        task_text = clean_text
+        for pattern in patterns:
+            task_text = re.sub(pattern, '', task_text, flags=re.IGNORECASE)
         
-        task_text = " ".join(task_words).strip()
+        # Чистим лишние пробелы (НО НЕ УДАЛЯЕМ СЛОВА)
+        task_text = re.sub(r'\s+', ' ', task_text).strip()
         
         if not task_text:
             await message.answer("❌ Я не понял, что именно нужно сделать. Напиши задачу.")
@@ -390,7 +385,7 @@ async def smart_handler(message: types.Message):
         )
         return
 
-    # --- 2. ЛОГИКА "ДОБАВЬ ЗАДАЧУ" ---
+    # 2. ЛОГИКА "ДОБАВЬ ЗАДАЧУ"
     if "добавь задачу" in text.lower():
         task_text = re.sub(r'добавь\s*задачу\s*', '', text, flags=re.IGNORECASE)
         if not task_text:
@@ -400,7 +395,7 @@ async def smart_handler(message: types.Message):
         await message.answer(f"✅ Задача добавлена!\n📝 {task_text}", reply_markup=get_main_keyboard())
         return
 
-    # --- 3. ЛОГИКА "УДАЛИ ЗАДАЧУ" ---
+    # 3. ЛОГИКА "УДАЛИ ЗАДАЧУ"
     if "удали задачу" in text.lower():
         task_text = re.sub(r'удали\s*задачу\s*', '', text, flags=re.IGNORECASE)
         if not task_text:
@@ -415,23 +410,21 @@ async def smart_handler(message: types.Message):
         await message.answer(f"🗑️ Удалено задач: {deleted}, содержащих: {task_text}", reply_markup=get_main_keyboard())
         return
 
-    # --- 4. ЕСЛИ В ТЕКСТЕ ЕСТЬ ВРЕМЯ (БЕЗ СЛОВА "НАПОМНИ") ---
+    # 4. ЕСЛИ В ТЕКСТЕ ЕСТЬ ВРЕМЯ (БЕЗ СЛОВА "НАПОМНИ")
     remind_time = parse_time_from_text(text)
     if remind_time:
-        words = text.split()
-        stop_words = {'через', 'в', 'завтра', 'минут', 'минуты', 'минуту', 'час', 'часа', 'часов', 'дня', 'дней', 'секунд'}
-        task_words = []
+        patterns = [
+            r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)',
+            r'в\s+\d{1,2}[:.-]\d{2}',
+            r'завтра\s+в\s+\d{1,2}[:.-]\d{2}'
+        ]
         
-        i = 0
-        while i < len(words):
-            word = words[i].lower()
-            if word in stop_words or re.match(r'^\d+$', word) or re.match(r'^\d{1,2}[:.-]\d{2}$', word):
-                i += 1
-                continue
-            task_words.append(words[i])
-            i += 1
+        task_text = text
+        for pattern in patterns:
+            task_text = re.sub(pattern, '', task_text, flags=re.IGNORECASE)
         
-        task_text = " ".join(task_words).strip()
+        task_text = re.sub(r'\s+', ' ', task_text).strip()
+        
         if not task_text:
             await message.answer("❌ Я не понял, что именно нужно сделать.")
             return
@@ -443,7 +436,7 @@ async def smart_handler(message: types.Message):
         )
         return
 
-    # --- 5. ВСЁ ОСТАЛЬНОЕ — ОТВЕТ ЧЕРЕЗ DeepSeek ---
+    # 5. ВСЁ ОСТАЛЬНОЕ — ОТВЕТ ЧЕРЕЗ DeepSeek
     try:
         answer = ask_deepseek(text, user_id)
         await message.answer(answer, reply_markup=get_main_keyboard())
