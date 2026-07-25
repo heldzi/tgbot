@@ -356,11 +356,24 @@ async def get_orienbank_rate_playwright(amount_rub=1000):
                 # В поле по умолчанию уже может стоять похожая сумма (например
                 # 1000 руб) - если ввести то же самое число, React не увидит
                 # изменения и калькулятор не сделает новый запрос. Поэтому
-                # сначала сбрасываем поле на заведомо другое значение.
+                # сначала сбрасываем поле на заведомо другое, но ВАЛИДНОЕ
+                # значение (минимальная сумма перевода - 110 руб, поэтому
+                # просто "1" не годится - он сам вызывает ошибку валидации).
+                # Явно дожидаемся именно ответа на это промежуточное значение,
+                # а не спим вслепую - так не спутаем его с ответом на целевую сумму.
                 amount_input = page.locator(AMOUNT_INPUT_SELECTOR)
                 await amount_input.click()
-                await amount_input.fill("1")
-                await page.wait_for_timeout(500)
+
+                intermediate_amount = amount_rub + 111  # заведомо валидно и отличается от целевого
+
+                async with page.expect_response(
+                    lambda r: "multitransfer-fee-calc/v3/commissions" in r.url,
+                    timeout=15000
+                ):
+                    await amount_input.fill(str(intermediate_amount))
+                    await amount_input.press("Tab")
+
+                await amount_input.click()
 
                 async with page.expect_response(
                     lambda r: "multitransfer-fee-calc/v3/commissions" in r.url,
