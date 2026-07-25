@@ -353,11 +353,14 @@ async def get_orienbank_rate_playwright(amount_rub=1000):
                 await page.wait_for_timeout(1000)
 
                 # Вводим сумму в рублях и ловим ответ их API на этот ввод.
-                # Поле помечено классом "money-input" - это маскированное
-                # поле (вроде react-number-format), которое перехватывает
-                # ввод посимвольно. Программная вставка через .fill() может
-                # не сработать для таких полей - печатаем по одному символу,
-                # как реальная клавиатура.
+                # Поле помечено классом "money-input" (маскированное поле,
+                # вроде react-number-format). Ни .fill(), ни посимвольная
+                # печать через .type() не давали стабильного результата -
+                # переходим на самый надёжный для React-полей способ: подменяем
+                # значение через нативный сеттер <input> и вручную диспатчим
+                # события input/change - именно так React отслеживает
+                # изменения, и это работает даже для полей со сложной
+                # внутренней логикой маски/форматирования.
                 #
                 # В поле по умолчанию уже может стоять похожая сумма (например
                 # 1000 руб) - если ввести то же самое число, React не увидит
@@ -369,19 +372,26 @@ async def get_orienbank_rate_playwright(amount_rub=1000):
                 amount_input = page.locator(AMOUNT_INPUT_SELECTOR)
                 intermediate_amount = amount_rub + 111  # заведомо валидно и отличается от целевого
 
-                async def _type_amount(value_str):
+                SET_VALUE_JS = """
+                (el, value) => {
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                    setter.call(el, value);
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.blur();
+                }
+                """
+
+                async def _set_amount(value_str):
                     await amount_input.click()
-                    await amount_input.press("Control+a")
-                    await amount_input.press("Backspace")
-                    await amount_input.type(value_str, delay=100)
-                    await amount_input.press("Tab")
+                    await amount_input.evaluate(SET_VALUE_JS, value_str)
 
                 try:
                     async with page.expect_response(
                         lambda r: "multitransfer-fee-calc/v3/commissions" in r.url,
                         timeout=15000
                     ):
-                        await _type_amount(str(intermediate_amount))
+                        await _set_amount(str(intermediate_amount))
                 except Exception:
                     return {"error": "Таймаут на промежуточном значении суммы (шаг 1) - калькулятор не отреагировал на ввод."}
 
@@ -390,7 +400,7 @@ async def get_orienbank_rate_playwright(amount_rub=1000):
                         lambda r: "multitransfer-fee-calc/v3/commissions" in r.url,
                         timeout=15000
                     ) as response_info:
-                        await _type_amount(str(amount_rub))
+                        await _set_amount(str(amount_rub))
                 except Exception:
                     return {"error": "Таймаут на целевой сумме (шаг 2) - калькулятор не отреагировал на ввод."}
 
