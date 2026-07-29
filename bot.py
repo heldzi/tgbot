@@ -5,6 +5,7 @@ import asyncio
 import datetime
 import re
 import json
+import uuid
 from dateutil.relativedelta import relativedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -12,7 +13,6 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeybo
 from dotenv import load_dotenv
 import pytz
 from aiohttp import web
-from playwright.async_api import async_playwright
 
 load_dotenv()
 
@@ -35,9 +35,9 @@ def is_allowed(user_id):
 
 user_history = {}
 
-# Пользователи, которые только что нажали "💱 Курс" и должны прислать
-# следующим сообщением сумму (в рублях или евро) для конвертации.
-waiting_for_conversion = set()
+# Пользователи, которые только что нажали "💱 Курс USD→RUB" и должны прислать
+# следующим сообщением сумму (в долларах или рублях) для конвертации.
+waiting_for_conversion_usd = set()
 
 def get_context(user_id):
     if user_id not in user_history:
@@ -89,7 +89,7 @@ def get_main_keyboard():
             ],
             [
                 KeyboardButton(text="⏰ Напомнить"),
-                KeyboardButton(text="💱 Курс")
+                KeyboardButton(text="💱 Курс USD→RUB")
             ]
         ],
         resize_keyboard=True,
@@ -157,36 +157,95 @@ def ask_deepseek(question, user_id):
     except Exception as e:
         return f"❌ Ошибка: {str(e)}"
 
-# ===== Курс валют (MultiTransfer, Ориёнбонк, RUB -> EUR) =====
-MULTITRANSFER_COMMISSIONS_URL = "https://api.multitransfer.ru/anonymous/multi/multitransfer-fee-calc/v3/commissions"
+# ===== Курс валют: USD -> BYN (Статусбанк, курс продажи) -> RUB (Т-Банк) =====
 
-def _find_orienbank_commission(data):
+def get_usd_byn_sell_rate():
     """
-    Рекурсивно ищет в ответе API блок с nameCyrillic == "Ориёнбонк"
-    внутри любых вложенных списков "commissions". Структура верхнего
-    уровня ответа не полностью известна, поэтому обходим весь JSON,
-    а не полагаемся на конкретный путь вида data["commissions"][0].
+    Курс продажи USD в BYN со Статусбанка (stbank.by/.../mobile/) - страница
+    обычная серверная (не JS), парсим обычным requests. Возвращает
+    {"rate": float} (BYN за 1 USD, курс ПРОДАЖИ) либо {"error": "..."}.
     """
-    if isinstance(data, dict):
-        if data.get("nameCyrillic") == "Ориёнбонк" and "money" in data:
-            return data
-        for value in data.values():
-            found = _find_orienbank_commission(value)
-            if found:
-                return found
-    elif isinstance(data, list):
-        for item in data:
-            found = _find_orienbank_commission(item)
-            if found:
-                return found
-    return None
+    try:
+        response = requests.get(
+            "https://stbank.by/private-client/currency-exchange-operations/mobile/",
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        )
+        if response.status_code != 200:
+            return {"error": f"HTTP {response.status_code}"}
 
-def parse_amount_and_currency(text):
+        plain = re.sub(r'<[^>]+>', ' ', response.text)
+        plain = re.sub(r'\s+', ' ', plain)
+
+        # Ищем блок "USD ... покупка X продажа Y" (нужна именно продажа)
+        match = re.search(r'USD.*?(\d+\.\d+)\s*покупка\s*(\d+\.\d+)\s*продажа', plain)
+        if not match:
+            return {"error": "Не нашёл курс USD в тексте страницы"}
+
+        return {"rate": float(match.group(2))}
+    except Exception as e:
+        return {"error": f"Исключение: {e}"}
+
+
+def get_byn_rub_tinkoff_rate():
     """
-    Распознаёт сумму и валюту из свободного текста пользователя.
-    Примеры, которые понимает: "5000 руб", "5000р", "5000₽", "5000 rub",
-    "100 евро", "100 eur", "100€", "5000" (без валюты - будет None).
-    Возвращает (amount: float, currency: 'RUB'|'EUR') или None, если не распознал.
+    Курс BYN -> RUB Т-Банка ("Перевод между своими счетами, оплата услуг
+    в сервисах Т-Банка"). Найден реальный API-эндпоинт (найден пользователем
+    через DevTools -> Network -> Fetch/XHR). Категория "CUTransfersPrivate"
+    (и ряд других категорий с теми же значениями) соответствует строке
+    "₽ -> Br" на сайте для этой операции. Возвращает {"rate": float}
+    (RUB за 1 BYN) либо {"error": "..."}.
+    """
+    try:
+        params = {
+            "wuid": uuid.uuid4().hex,
+            "origin": "web,ib5,platform",
+            "appName": "supreme",
+            "appVersion": "0.0.1",
+            "platform": "web",
+            "from": "BYN",
+            "to": "RUB",
+        }
+        response = requests.get(
+            "https://www.tbank.ru/api/common/v1/currency_rates",
+            params=params,
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        )
+        if response.status_code != 200:
+            return {"error": f"HTTP {response.status_code}: {response.text[:300]}"}
+
+        data = response.json()
+        rates = data.get("payload", {}).get("rates", [])
+        for item in rates:
+            if item.get("category") == "CUTransfersPrivate":
+                return {"rate": float(item["sell"])}
+
+        return {"error": f"Не нашёл категорию CUTransfersPrivate в ответе: {str(data)[:300]}"}
+    except Exception as e:
+        return {"error": f"Исключение: {e}"}
+
+
+def get_usd_rub_via_byn_rate():
+    """
+    Итоговый курс: USD -> BYN (продажа, Статусбанк) -> RUB (Т-Банк).
+    Возвращает {"rate": float} (RUB за 1 USD) либо {"error": "..."}.
+    """
+    usd_byn = get_usd_byn_sell_rate()
+    if "error" in usd_byn:
+        return {"error": f"Шаг USD->BYN (Статусбанк): {usd_byn['error']}"}
+
+    byn_rub = get_byn_rub_tinkoff_rate()
+    if "error" in byn_rub:
+        return {"error": f"Шаг BYN->RUB (Т-Банк): {byn_rub['error']}"}
+
+    return {"rate": usd_byn["rate"] * byn_rub["rate"]}
+
+
+def parse_amount_and_currency_usd(text):
+    """
+    Распознаёт сумму и валюту (USD или RUB) из свободного текста.
+    Возвращает (amount: float, currency: 'USD'|'RUB') или None.
     """
     text = text.strip().lower().replace(",", ".")
 
@@ -195,263 +254,13 @@ def parse_amount_and_currency(text):
         return None
     amount = float(match.group(1))
 
-    if any(kw in text for kw in ["eur", "евро", "€"]):
-        return amount, "EUR"
+    if any(kw in text for kw in ["usd", "доллар", "$"]):
+        return amount, "USD"
     if any(kw in text for kw in ["rub", "руб", "₽", "р."]) or re.search(r'\d+\s*р\b', text):
         return amount, "RUB"
 
     return None
 
-def get_orienbank_rate_fast(amount_rub=1000):
-    """
-    Быстрый способ: прямой POST-запрос через requests (с прогревом кук).
-    Возвращает словарь {rate, amount_rub, amount_eur} при успехе,
-    либо {"error": "..."} при неудаче.
-    """
-    payload = {
-        "countryCode": "TJK",
-        "money": {
-            "acceptedMoney": {"amount": amount_rub, "currencyCode": "RUB"},
-            "withdrawMoney": {"currencyCode": "EUR"}
-        },
-        "range": "ALL_PLUS_LIMITS"
-    }
-    common_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    }
-    api_headers = {
-        **common_headers,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Origin": "https://multitransfer.ru",
-        "Referer": "https://multitransfer.ru/transfer/tajikistan"
-    }
-    try:
-        session = requests.Session()
-        try:
-            session.get(
-                "https://multitransfer.ru/transfer/tajikistan",
-                headers=common_headers,
-                timeout=15
-            )
-        except Exception:
-            pass
-
-        response = session.post(MULTITRANSFER_COMMISSIONS_URL, json=payload, headers=api_headers, timeout=15)
-        if response.status_code != 200:
-            return {"error": f"HTTP {response.status_code}: {response.text[:300]}"}
-        data = response.json()
-        commission = _find_orienbank_commission(data)
-        if not commission:
-            return {"error": f"Ориёнбонк не найден в ответе. Сырой ответ: {str(data)[:300]}"}
-        money = commission["money"]
-        return {
-            "rate": float(money["rate"]),
-            "amount_rub": float(money["acceptedMoney"]["amount"]),
-            "amount_eur": float(money["withdrawMoney"]["amount"])
-        }
-    except Exception as e:
-        print(f"Ошибка (fast) при получении курса Ориёнбонка: {e}")
-        return {"error": f"Исключение: {e}"}
-
-
-async def get_orienbank_rate_playwright(amount_rub=1000):
-    """
-    Более надёжный способ: открываем настоящий headless-Chromium, заходим на
-    страницу калькулятора и физически кликаем/печатаем как обычный пользователь
-    (жмём EUR, вводим сумму в поле), а не подделываем fetch() руками - так все
-    нужные токены/заголовки, которые генерирует их собственный JS, подставляются
-    сами. Сам ответ их API на этот ввод перехватываем через page.expect_response.
-    В ответе API уже содержится список ВСЕХ банков (включая Ориёнбонк) для
-    введённой суммы - переключать "способ перевода" в интерфейсе не нужно.
-    """
-    EUR_SELECTOR = '[data-testid="transfer_widget_currency-list_EUR"]'
-    AMOUNT_INPUT_SELECTOR = 'input[name="amount"]'
-
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                channel="chromium",
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-software-rasterizer",
-                    "--disable-extensions",
-                    "--disable-background-networking",
-                    "--disable-background-timer-throttling",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-breakpad",
-                    "--disable-component-extensions-with-background-pages",
-                    "--disable-default-apps",
-                    "--disable-sync",
-                    "--disable-translate",
-                    "--metrics-recording-only",
-                    "--mute-audio",
-                    "--no-first-run",
-                    "--safebrowsing-disable-auto-update",
-                    "--js-flags=--max-old-space-size=128",
-                    "--single-process"
-                ]
-            )
-            try:
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-                    locale="ru-RU",
-                    viewport={"width": 800, "height": 600}
-                )
-
-                # Блокируем загрузку картинок/шрифтов/стилей/медиа - нам нужен
-                # только DOM и JS-логика калькулятора, визуал не нужен вообще.
-                # Это заметно снижает память и сетевой трафик браузера.
-                async def _block_heavy_resources(route):
-                    if route.request.resource_type in ("image", "font", "media", "stylesheet"):
-                        await route.abort()
-                    else:
-                        await route.continue_()
-
-                await context.route("**/*", _block_heavy_resources)
-
-                page = await context.new_page()
-                await page.goto(
-                    "https://multitransfer.ru/transfer/tajikistan",
-                    wait_until="networkidle",
-                    timeout=30000
-                )
-
-                # На слабом CPU headless-инстанса JS-гидратация (когда React
-                # навешивает реальные обработчики/data-testid на уже
-                # отрисованный сервером HTML) может занимать заметно дольше,
-                # чем networkidle. Ждём отдельно появления самого элемента,
-                # а не полагаемся только на networkidle.
-                # Выбираем валюту получения EUR (кликаем по кнопке-переключателю)
-                try:
-                    await page.wait_for_selector(EUR_SELECTOR, state="visible", timeout=30000)
-                    await page.click(EUR_SELECTOR, timeout=10000)
-                except Exception:
-                    # Элемент не нашёлся - собираем диагностику: что реально
-                    # видит браузер на странице (заголовок, URL, видимый текст).
-                    # Это поможет понять, показывают ли нам капчу/заглушку/другой
-                    # дизайн вместо обычного калькулятора.
-                    title = await page.title()
-                    current_url = page.url
-                    try:
-                        body_text = await page.locator("body").inner_text(timeout=5000)
-                    except Exception:
-                        body_text = "(не удалось прочитать текст страницы)"
-                    return {
-                        "error": (
-                            f"Кнопка EUR не найдена за 30 сек.\n"
-                            f"URL: {current_url}\n"
-                            f"Title: {title}\n"
-                            f"Текст страницы (первые 500 симв.): {body_text[:500]}"
-                        )
-                    }
-
-                await page.wait_for_timeout(1000)
-
-                # Вводим сумму в рублях и ловим ответ их API на этот ввод.
-                # Поле помечено классом "money-input" (маскированное поле,
-                # вроде react-number-format). Ни .fill(), ни посимвольная
-                # печать через .type() не давали стабильного результата -
-                # переходим на самый надёжный для React-полей способ: подменяем
-                # значение через нативный сеттер <input> и вручную диспатчим
-                # события input/change - именно так React отслеживает
-                # изменения, и это работает даже для полей со сложной
-                # внутренней логикой маски/форматирования.
-                #
-                # В поле по умолчанию уже может стоять похожая сумма (например
-                # 1000 руб) - если ввести то же самое число, React не увидит
-                # изменения. Поэтому сначала сбрасываем поле на заведомо другое,
-                # но ВАЛИДНОЕ значение (минимальная сумма перевода - 110 руб,
-                # просто "1" не годится - вызывает ошибку валидации). Явно
-                # дожидаемся ответа именно на промежуточное значение, а не спим
-                # вслепую - так не спутаем его с ответом на целевую сумму.
-                amount_input = page.locator(AMOUNT_INPUT_SELECTOR)
-                intermediate_amount = amount_rub + 111  # заведомо валидно и отличается от целевого
-
-                SET_VALUE_JS = """
-                (el, value) => {
-                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                    setter.call(el, value);
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                    el.blur();
-                }
-                """
-
-                async def _set_amount(value_str):
-                    await amount_input.click()
-                    await amount_input.evaluate(SET_VALUE_JS, value_str)
-
-                try:
-                    async with page.expect_response(
-                        lambda r: "multitransfer-fee-calc/v3/commissions" in r.url,
-                        timeout=15000
-                    ):
-                        await _set_amount(str(intermediate_amount))
-                except Exception:
-                    return {"error": "Таймаут на промежуточном значении суммы (шаг 1) - калькулятор не отреагировал на ввод."}
-
-                try:
-                    async with page.expect_response(
-                        lambda r: "multitransfer-fee-calc/v3/commissions" in r.url,
-                        timeout=15000
-                    ) as response_info:
-                        await _set_amount(str(amount_rub))
-                except Exception:
-                    return {"error": "Таймаут на целевой сумме (шаг 2) - калькулятор не отреагировал на ввод."}
-
-                response = await response_info.value
-                if response.status != 200:
-                    body = await response.text()
-                    return {"error": f"HTTP {response.status} (playwright): {body[:300]}"}
-
-                data = await response.json()
-            finally:
-                await browser.close()
-
-        commission = _find_orienbank_commission(data)
-        if not commission:
-            return {"error": f"Ориёнбонк не найден (playwright). Ответ: {str(data)[:300]}"}
-        money = commission["money"]
-        return {
-            "rate": float(money["rate"]),
-            "amount_rub": float(money["acceptedMoney"]["amount"]),
-            "amount_eur": float(money["withdrawMoney"]["amount"])
-        }
-    except Exception as e:
-        print(f"Ошибка (playwright) при получении курса Ориёнбонка: {e}")
-        return {"error": f"Исключение (playwright): {e}"}
-
-
-async def get_orienbank_rate(amount_rub=1000):
-    """
-    Общая точка входа: сначала пробуем быстрый способ (requests),
-    если он падает с ошибкой - пробуем через Playwright.
-    Playwright обёрнут жёстким таймаутом в 60 сек: если он где-то
-    зависнет (например, headless-браузеру не хватает памяти/системных
-    библиотек на бесплатном тарифе Render), это не повесит бота навсегда,
-    а вернёт понятную ошибку через минуту.
-    """
-    loop = asyncio.get_event_loop()
-    fast_result = await loop.run_in_executor(None, get_orienbank_rate_fast, amount_rub)
-    if fast_result and "error" not in fast_result:
-        return fast_result
-
-    print(f"Быстрый способ не сработал ({fast_result.get('error') if fast_result else '?'}), пробуем Playwright...")
-    try:
-        playwright_result = await asyncio.wait_for(get_orienbank_rate_playwright(amount_rub), timeout=60)
-    except asyncio.TimeoutError:
-        return {"error": "Playwright завис и не ответил за 60 сек (похоже на нехватку памяти/ресурсов на сервере)."}
-
-    if playwright_result and "error" not in playwright_result:
-        return playwright_result
-
-    # Оба способа не сработали - возвращаем ошибку от Playwright (он последний пробовал)
-    return playwright_result
 
 def save_task_to_db(text, remind_time=None):
     conn = sqlite3.connect('tasks.db')
@@ -539,25 +348,25 @@ async def remind_button(message: types.Message):
         reply_markup=get_main_keyboard()
     )
 
-@dp.message(lambda message: message.text == "💱 Курс")
-async def kurs_button(message: types.Message):
+@dp.message(lambda message: message.text == "💱 Курс USD→RUB")
+async def kurs_usd_button(message: types.Message):
     if not is_allowed(message.from_user.id):
         await message.answer("⛔ Доступ запрещён.")
         return
 
-    result = await get_orienbank_rate(amount_rub=1000)
+    result = get_usd_rub_via_byn_rate()
 
     if result and "error" not in result:
-        rate_line = f"📊 Текущий курс: 1 EUR = {result['rate']:.2f} RUB\n\n"
+        rate_line = f"📊 Текущий курс: 1 USD = {result['rate']:.4f} RUB\n\n"
     else:
         error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
         rate_line = f"⚠️ Не удалось получить текущий курс (детали: {error_text})\n\n"
 
-    waiting_for_conversion.add(message.from_user.id)
+    waiting_for_conversion_usd.add(message.from_user.id)
     await message.answer(
         f"💱 {rate_line}"
-        "Введите сумму для конвертации (Ориёнбонк, RUB ⇄ EUR).\n"
-        "Например: 5000 руб или 100 евро",
+        "Введите сумму для конвертации (USD ⇄ RUB).\n"
+        "Например: 100 usd или 9000 руб",
         reply_markup=get_main_keyboard()
     )
 
@@ -622,7 +431,7 @@ async def start(message: types.Message):
         "/add задача — просто добавит задачу\n"
         "/tasks — показать все задачи\n"
         "/del номер — удалить задачу по номеру\n"
-        "/kurs — курс Ориёнбонк RUB → EUR\n\n"
+        "/kurs — курс USD → RUB (через BYN)\n\n"
         "💬 Или просто напиши вопрос — я отвечу через DeepSeek!",
         reply_markup=get_main_keyboard()
     )
@@ -680,16 +489,15 @@ async def kurs_command(message: types.Message):
         await message.answer("⛔ Доступ запрещён.")
         return
 
-    result = await get_orienbank_rate(amount_rub=1000)
+    result = get_usd_rub_via_byn_rate()
     if not result or "error" in result:
         error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
         await message.answer(f"❌ Не удалось получить курс.\n\nДетали: {error_text}", reply_markup=get_main_keyboard())
         return
 
     await message.answer(
-        f"💱 Курс Ориёнбонк (RUB → EUR)\n\n"
-        f"1 EUR = {result['rate']:.2f} RUB\n"
-        f"{result['amount_rub']:.0f} RUB → {result['amount_eur']:.2f} EUR",
+        f"💱 Курс USD → RUB (через BYN: Статусбанк + Т-Банк)\n\n"
+        f"1 USD = {result['rate']:.4f} RUB",
         reply_markup=get_main_keyboard()
     )
 
@@ -751,42 +559,42 @@ async def smart_handler(message: types.Message):
     text = message.text.strip()
     user_id = message.from_user.id
 
-    # ===== ОЖИДАЕМ СУММУ ДЛЯ КОНВЕРТАЦИИ ПОСЛЕ КНОПКИ "💱 Курс" =====
-    if user_id in waiting_for_conversion:
-        if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс"]:
+    # ===== ОЖИДАЕМ СУММУ ДЛЯ КОНВЕРТАЦИИ ПОСЛЕ КНОПКИ "💱 Курс USD→RUB" =====
+    if user_id in waiting_for_conversion_usd:
+        if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB"]:
             # Пользователь передумал и нажал другую кнопку/команду - выходим из режима ожидания
-            waiting_for_conversion.discard(user_id)
+            waiting_for_conversion_usd.discard(user_id)
         else:
-            parsed = parse_amount_and_currency(text)
+            parsed = parse_amount_and_currency_usd(text)
             if not parsed:
                 # Не сбрасываем ожидание - даём попробовать ещё раз, не заставляя жать кнопку заново
                 await message.answer(
-                    "❌ Не понял сумму. Напишите, например: 5000 руб или 100 евро",
+                    "❌ Не понял сумму. Напишите, например: 100 usd или 9000 руб",
                     reply_markup=get_main_keyboard()
                 )
                 return
 
-            waiting_for_conversion.discard(user_id)
+            waiting_for_conversion_usd.discard(user_id)
             amount, currency = parsed
-            result = await get_orienbank_rate(amount_rub=amount if currency == "RUB" else 1000)
+            result = get_usd_rub_via_byn_rate()
             if not result or "error" in result:
                 error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
                 await message.answer(f"❌ Не удалось получить курс.\n\nДетали: {error_text}", reply_markup=get_main_keyboard())
                 return
 
-            rate = result["rate"]  # RUB за 1 EUR
+            rate = result["rate"]  # RUB за 1 USD
             if currency == "RUB":
                 converted = amount / rate
                 await message.answer(
-                    f"💱 {amount:.2f} RUB ≈ {converted:.2f} EUR\n"
-                    f"(курс Ориёнбонк: 1 EUR = {rate:.2f} RUB)",
+                    f"💱 {amount:.2f} RUB ≈ {converted:.2f} USD\n"
+                    f"(курс: 1 USD = {rate:.4f} RUB)",
                     reply_markup=get_main_keyboard()
                 )
             else:
                 converted = amount * rate
                 await message.answer(
-                    f"💱 {amount:.2f} EUR ≈ {converted:.2f} RUB\n"
-                    f"(курс Ориёнбонк: 1 EUR = {rate:.2f} RUB)",
+                    f"💱 {amount:.2f} USD ≈ {converted:.2f} RUB\n"
+                    f"(курс: 1 USD = {rate:.4f} RUB)",
                     reply_markup=get_main_keyboard()
                 )
             return
@@ -826,7 +634,7 @@ async def smart_handler(message: types.Message):
         return
 
     # ===== ЕСЛИ ЭТО КОМАНДА ИЛИ КНОПКА — ИГНОРИРУЕМ =====
-    if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс"]:
+    if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB"]:
         return
 
     # ===== "ДОБАВЬ ЗАДАЧУ" =====
