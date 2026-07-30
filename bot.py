@@ -84,7 +84,6 @@ def get_main_keyboard():
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="📝 Мои задачи"),
                 KeyboardButton(text="➕ Добавить задачу"),
                 KeyboardButton(text="🗑 Удалить задачу")
             ],
@@ -320,6 +319,11 @@ WEEKDAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 # user_id -> {"due_date": "YYYY-MM-DD", "text": "...", "weekdays": {0,2,4}}
 pending_calendar_task = {}
 
+# Пользователи, которые нажали "➕ Добавить задачу" и должны прислать
+# следующим сообщением текст задачи (просто добавление на сегодня,
+# без похода через календарь).
+waiting_for_quick_task = set()
+
 
 def task_occurs_on(due_date, recurrence, date_str):
     """
@@ -388,6 +392,7 @@ def toggle_task_completion(task_id, date_str):
 def build_calendar_keyboard(year, month):
     cal = calendar.Calendar(firstweekday=0)
     month_dates = list(cal.itermonthdates(year, month))
+    today = get_moscow_now().date()
 
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
@@ -415,7 +420,12 @@ def build_calendar_keyboard(year, month):
         if date_obj.month != month:
             week_row.append(InlineKeyboardButton(text=" ", callback_data="cal_noop"))
         else:
-            label = f"{date_obj.day}•" if date_obj.day in days_with_tasks else str(date_obj.day)
+            is_today = date_obj == today
+            has_tasks = date_obj.day in days_with_tasks
+            if is_today:
+                label = f"[{date_obj.day}•]" if has_tasks else f"[{date_obj.day}]"
+            else:
+                label = f"{date_obj.day}•" if has_tasks else str(date_obj.day)
             week_row.append(InlineKeyboardButton(text=label, callback_data=f"cal_day:{date_obj.strftime('%Y-%m-%d')}"))
         if len(week_row) == 7:
             rows.append(week_row)
@@ -542,12 +552,9 @@ async def start_web():
     await site.start()
     print("🌐 Веб-сервер запущен на порту 10000")
 
-@dp.message(lambda message: message.text == "📝 Мои задачи")
-async def show_tasks_button(message: types.Message):
-    await list_tasks(message)
-
 @dp.message(lambda message: message.text == "➕ Добавить задачу")
 async def add_task_button(message: types.Message):
+    waiting_for_quick_task.add(message.from_user.id)
     await message.answer(
         "✏️ Напишите текст задачи.\n"
         "Если хотите с напоминанием, добавьте время: 'в 15:00' или 'через 30 минут'",
@@ -955,9 +962,37 @@ async def smart_handler(message: types.Message):
     text = message.text.strip()
     user_id = message.from_user.id
 
+    # ===== ЖДЁМ ТЕКСТ ЗАДАЧИ ПОСЛЕ КНОПКИ "➕ Добавить задачу" =====
+    if user_id in waiting_for_quick_task:
+        cancel_texts = ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "📅 Календарь"]
+        if text.startswith("/") or text in cancel_texts:
+            waiting_for_quick_task.discard(user_id)
+        else:
+            waiting_for_quick_task.discard(user_id)
+            remind_time = parse_time_from_text(text)
+            if remind_time:
+                task_text = re.sub(r'\d{1,2}[:.-]\d{2}', '', text)
+                task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', task_text, flags=re.IGNORECASE)
+                task_text = re.sub(r'завтра\s+в', '', task_text, flags=re.IGNORECASE)
+                task_text = re.sub(r'сегодня\s+в', '', task_text, flags=re.IGNORECASE)
+                task_text = re.sub(r'в', '', task_text)
+                task_text = re.sub(r'\s+', ' ', task_text).strip()
+                if not task_text:
+                    await message.answer("❌ Я не понял, что именно нужно сделать.", reply_markup=get_main_keyboard())
+                    return
+                keyboard = get_task_confirmation_keyboard(task_text, remind_time)
+                await message.answer(
+                    f"📝 Задача: {task_text}\n⏰ Напоминание в {remind_time.strftime('%H:%M')}\n\nДобавить?",
+                    reply_markup=keyboard
+                )
+            else:
+                save_task_to_db(text)
+                await message.answer(f"✅ Задача добавлена!\n📝 {text}", reply_markup=get_main_keyboard())
+            return
+
     # ===== ЖДЁМ ТЕКСТ ЗАДАЧИ ПОСЛЕ "➕ Добавить задачу на этот день" (календарь) =====
     if user_id in pending_calendar_task and "text" not in pending_calendar_task[user_id]:
-        cancel_texts = ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "📅 Календарь"]
+        cancel_texts = ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "📅 Календарь"]
         if text.startswith("/") or text in cancel_texts:
             # Пользователь передумал - выходим из режима добавления через календарь
             pending_calendar_task.pop(user_id, None)
@@ -973,7 +1008,7 @@ async def smart_handler(message: types.Message):
 
     # ===== ОЖИДАЕМ СУММУ ДЛЯ КОНВЕРТАЦИИ ПОСЛЕ КНОПКИ "💱 Курс USD→RUB" =====
     if user_id in waiting_for_conversion_usd:
-        if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "📅 Календарь"]:
+        if text.startswith("/") or text in ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "📅 Календарь"]:
             # Пользователь передумал и нажал другую кнопку/команду - выходим из режима ожидания
             waiting_for_conversion_usd.discard(user_id)
         else:
@@ -1051,7 +1086,7 @@ async def smart_handler(message: types.Message):
         return
 
     # ===== ЕСЛИ ЭТО КОМАНДА ИЛИ КНОПКА — ИГНОРИРУЕМ =====
-    if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "📅 Календарь"]:
+    if text.startswith("/") or text in ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "📅 Календарь"]:
         return
 
     # ===== "ДОБАВЬ ЗАДАЧУ" =====
