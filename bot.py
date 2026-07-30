@@ -729,7 +729,7 @@ async def kurs_multi_button(message: types.Message):
         usd_line = f"⚠️ USD недоступен (детали: {error_text})"
 
     if eur_result and "error" not in eur_result:
-        eur_line = f"1 EUR = {eur_result['buy']:.2f} / {eur_result['sell']:.2f} RUB (Альфа-Банк, покупка/продажа)"
+        eur_line = f"1 EUR = {eur_result['sell']:.2f} RUB (Альфа-Банк, продажа)"
     else:
         error_text = eur_result.get("error", "неизвестная ошибка") if eur_result else "неизвестная ошибка"
         eur_line = f"⚠️ EUR недоступен (детали: {error_text})"
@@ -1020,7 +1020,7 @@ async def kurs_command(message: types.Message):
         usd_line = f"⚠️ USD недоступен (детали: {error_text})"
 
     if eur_result and "error" not in eur_result:
-        eur_line = f"1 EUR = {eur_result['buy']:.2f} / {eur_result['sell']:.2f} RUB (Альфа-Банк, покупка/продажа)"
+        eur_line = f"1 EUR = {eur_result['sell']:.2f} RUB (Альфа-Банк, продажа)"
     else:
         error_text = eur_result.get("error", "неизвестная ошибка") if eur_result else "неизвестная ошибка"
         eur_line = f"⚠️ EUR недоступен (детали: {error_text})"
@@ -1170,10 +1170,10 @@ async def smart_handler(message: types.Message):
                     error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
                     await message.answer(f"❌ Не удалось получить курс EUR.\n\nДетали: {error_text}", reply_markup=get_main_keyboard())
                     return
-                converted = amount * result["buy"]
+                converted = amount * result["sell"]
                 await message.answer(
                     f"💱 {amount:.2f} EUR ≈ {converted:.2f} RUB\n"
-                    f"(курс покупки: 1 EUR = {result['buy']:.2f} RUB)",
+                    f"(курс продажи: 1 EUR = {result['sell']:.2f} RUB)",
                     reply_markup=get_main_keyboard()
                 )
 
