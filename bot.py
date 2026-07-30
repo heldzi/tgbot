@@ -189,12 +189,9 @@ def get_usd_byn_sell_rate():
 
 def get_byn_rub_tinkoff_rate():
     """
-    Курс BYN -> RUB Т-Банка ("Перевод между своими счетами, оплата услуг
-    в сервисах Т-Банка"). Найден реальный API-эндпоинт (найден пользователем
-    через DevTools -> Network -> Fetch/XHR). Категория "CUTransfersPrivate"
-    (и ряд других категорий с теми же значениями) соответствует строке
-    "₽ -> Br" на сайте для этой операции. Возвращает {"rate": float}
-    (RUB за 1 BYN) либо {"error": "..."}.
+    Курс BYN -> RUB Т-Банка. Категория "DebitCardsTransfers" - подобрана
+    пользователем как наиболее точно соответствующая его операции.
+    Возвращает {"rate": float} (RUB за 1 BYN) либо {"error": "..."}.
     """
     try:
         params = {
@@ -218,10 +215,10 @@ def get_byn_rub_tinkoff_rate():
         data = response.json()
         rates = data.get("payload", {}).get("rates", [])
         for item in rates:
-            if item.get("category") == "CUTransfersPrivate":
+            if item.get("category") == "DebitCardsTransfers":
                 return {"rate": float(item["sell"])}
 
-        return {"error": f"Не нашёл категорию CUTransfersPrivate в ответе: {str(data)[:300]}"}
+        return {"error": f"Не нашёл категорию DebitCardsTransfers в ответе: {str(data)[:300]}"}
     except Exception as e:
         return {"error": f"Исключение: {e}"}
 
