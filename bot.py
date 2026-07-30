@@ -1,6 +1,8 @@
 import os
 import sqlite3
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 import asyncio
 import datetime
 import re
@@ -36,10 +38,9 @@ def is_allowed(user_id):
 
 user_history = {}
 
-# Пользователи, которые только что нажали "💱 Курс USD→RUB" и должны прислать
+# Пользователи, которые только что нажали "💱 Курс USD/EUR" и должны прислать
 # следующим сообщением сумму (в долларах или рублях) для конвертации.
-waiting_for_conversion_usd = set()
-waiting_for_conversion_eur = set()
+waiting_for_conversion_multi = set()
 
 def get_context(user_id):
     if user_id not in user_history:
@@ -91,8 +92,7 @@ def get_main_keyboard():
             [
                 KeyboardButton(text="📅 Календарь"),
                 KeyboardButton(text="⏰ Напомнить"),
-                KeyboardButton(text="💱 Курс USD→RUB"),
-                KeyboardButton(text="💱 Курс EUR (Альфа)")
+                KeyboardButton(text="💱 Курс USD/EUR")
             ]
         ],
         resize_keyboard=True,
@@ -297,7 +297,12 @@ def get_alfabank_eur_rub_rate():
             "https://alfabank.ru/api/v1/scrooge/currencies/alfa-rates",
             params=params,
             timeout=15,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            # Сеть между сервером и alfabank.ru подменяет сертификат
+            # (self-signed certificate in certificate chain) - похоже на
+            # DPI/прокси на сетевом пути. Отключаем проверку, т.к. тут
+            # только читаем публичный курс валют, ничего приватного.
+            verify=False
         )
         if response.status_code != 200:
             return {"error": f"HTTP {response.status_code}: {response.text[:300]}"}
@@ -353,6 +358,28 @@ def parse_amount_and_currency_usd(text):
 
     if any(kw in text for kw in ["usd", "доллар", "$"]):
         return amount, "USD"
+    if any(kw in text for kw in ["rub", "руб", "₽", "р."]) or re.search(r'\d+\s*р\b', text):
+        return amount, "RUB"
+
+    return None
+
+
+def parse_amount_and_currency_multi(text):
+    """
+    Распознаёт сумму и валюту (USD, EUR или RUB) из свободного текста.
+    Возвращает (amount: float, currency: 'USD'|'EUR'|'RUB') или None.
+    """
+    text = text.strip().lower().replace(",", ".")
+
+    match = re.search(r'(\d+(?:\.\d+)?)', text)
+    if not match:
+        return None
+    amount = float(match.group(1))
+
+    if any(kw in text for kw in ["usd", "доллар", "$"]):
+        return amount, "USD"
+    if any(kw in text for kw in ["eur", "евро", "€"]):
+        return amount, "EUR"
     if any(kw in text for kw in ["rub", "руб", "₽", "р."]) or re.search(r'\d+\s*р\b', text):
         return amount, "RUB"
 
@@ -680,52 +707,34 @@ async def remind_button(message: types.Message):
         reply_markup=get_main_keyboard()
     )
 
-@dp.message(lambda message: message.text == "💱 Курс USD→RUB")
-async def kurs_usd_button(message: types.Message):
+@dp.message(lambda message: message.text == "💱 Курс USD/EUR")
+async def kurs_multi_button(message: types.Message):
     if not is_allowed(message.from_user.id):
         await message.answer("⛔ Доступ запрещён.")
         return
 
-    result = get_usd_rub_via_byn_rate()
+    usd_result = get_usd_rub_via_byn_rate()
+    eur_result = get_alfabank_eur_rub_rate()
 
-    if result and "error" not in result:
-        rate_line = (
-            f"📊 Расчёт по шагам:\n"
-            f"1) USD → BYN (Статусбанк, продажа): 1 USD = {result['usd_byn']:.4f} BYN\n"
-            f"2) BYN → RUB (Т-Банк): 1 BYN = {result['byn_rub']:.4f} RUB\n"
-            f"Итого: 1 USD = {result['rate']:.4f} RUB\n\n"
-        )
+    if usd_result and "error" not in usd_result:
+        usd_line = f"1 USD = {usd_result['rate']:.4f} RUB (через BYN: Статусбанк + Т-Банк)"
     else:
-        error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
-        rate_line = f"⚠️ Не удалось получить текущий курс (детали: {error_text})\n\n"
+        error_text = usd_result.get("error", "неизвестная ошибка") if usd_result else "неизвестная ошибка"
+        usd_line = f"⚠️ USD недоступен (детали: {error_text})"
 
-    waiting_for_conversion_usd.add(message.from_user.id)
-    await message.answer(
-        f"💱 {rate_line}"
-        "Введите сумму для конвертации (USD ⇄ RUB).\n"
-        "Например: 100 usd или 9000 руб",
-        reply_markup=get_main_keyboard()
-    )
-
-@dp.message(lambda message: message.text == "💱 Курс EUR (Альфа)")
-async def kurs_eur_alfabank_button(message: types.Message):
-    if not is_allowed(message.from_user.id):
-        await message.answer("⛔ Доступ запрещён.")
-        return
-
-    result = get_alfabank_eur_rub_rate()
-
-    if result and "error" not in result:
-        rate_line = f"📊 Альфа-Банк (наличные): 1 EUR = {result['buy']:.2f} / {result['sell']:.2f} RUB (покупка/продажа)\n\n"
+    if eur_result and "error" not in eur_result:
+        eur_line = f"1 EUR = {eur_result['buy']:.2f} / {eur_result['sell']:.2f} RUB (Альфа-Банк, покупка/продажа)"
     else:
-        error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
-        rate_line = f"⚠️ Не удалось получить текущий курс (детали: {error_text})\n\n"
+        error_text = eur_result.get("error", "неизвестная ошибка") if eur_result else "неизвестная ошибка"
+        eur_line = f"⚠️ EUR недоступен (детали: {error_text})"
 
-    waiting_for_conversion_eur.add(message.from_user.id)
+    waiting_for_conversion_multi.add(message.from_user.id)
     await message.answer(
-        f"💱 {rate_line}"
-        "Введите сумму для конвертации (EUR ⇄ RUB).\n"
-        "Например: 100 евро или 9000 руб",
+        f"💱 Курс USD и EUR:\n"
+        f"{usd_line}\n"
+        f"{eur_line}\n\n"
+        "Введите сумму для конвертации (USD, EUR или RUB).\n"
+        "Например: 100 usd, 100 евро или 9000 руб",
         reply_markup=get_main_keyboard()
     )
 
@@ -995,17 +1004,25 @@ async def kurs_command(message: types.Message):
         await message.answer("⛔ Доступ запрещён.")
         return
 
-    result = get_usd_rub_via_byn_rate()
-    if not result or "error" in result:
-        error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
-        await message.answer(f"❌ Не удалось получить курс.\n\nДетали: {error_text}", reply_markup=get_main_keyboard())
-        return
+    usd_result = get_usd_rub_via_byn_rate()
+    eur_result = get_alfabank_eur_rub_rate()
+
+    if usd_result and "error" not in usd_result:
+        usd_line = f"1 USD = {usd_result['rate']:.4f} RUB (через BYN: Статусбанк + Т-Банк)"
+    else:
+        error_text = usd_result.get("error", "неизвестная ошибка") if usd_result else "неизвестная ошибка"
+        usd_line = f"⚠️ USD недоступен (детали: {error_text})"
+
+    if eur_result and "error" not in eur_result:
+        eur_line = f"1 EUR = {eur_result['buy']:.2f} / {eur_result['sell']:.2f} RUB (Альфа-Банк, покупка/продажа)"
+    else:
+        error_text = eur_result.get("error", "неизвестная ошибка") if eur_result else "неизвестная ошибка"
+        eur_line = f"⚠️ EUR недоступен (детали: {error_text})"
 
     await message.answer(
-        f"💱 Курс USD → RUB (через BYN: Статусбанк + Т-Банк)\n\n"
-        f"1) USD → BYN (Статусбанк, продажа): 1 USD = {result['usd_byn']:.4f} BYN\n"
-        f"2) BYN → RUB (Т-Банк): 1 BYN = {result['byn_rub']:.4f} RUB\n"
-        f"Итого: 1 USD = {result['rate']:.4f} RUB",
+        f"💱 Курс USD и EUR:\n"
+        f"{usd_line}\n"
+        f"{eur_line}",
         reply_markup=get_main_keyboard()
     )
 
@@ -1069,7 +1086,7 @@ async def smart_handler(message: types.Message):
 
     # ===== ЖДЁМ ТЕКСТ ЗАДАЧИ ПОСЛЕ КНОПКИ "➕ Добавить задачу" =====
     if user_id in waiting_for_quick_task:
-        cancel_texts = ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "💱 Курс EUR (Альфа)", "📅 Календарь"]
+        cancel_texts = ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD/EUR", "📅 Календарь"]
         if text.startswith("/") or text in cancel_texts:
             waiting_for_quick_task.discard(user_id)
         else:
@@ -1097,7 +1114,7 @@ async def smart_handler(message: types.Message):
 
     # ===== ЖДЁМ ТЕКСТ ЗАДАЧИ ПОСЛЕ "➕ Добавить задачу на этот день" (календарь) =====
     if user_id in pending_calendar_task and "text" not in pending_calendar_task[user_id]:
-        cancel_texts = ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "💱 Курс EUR (Альфа)", "📅 Календарь"]
+        cancel_texts = ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD/EUR", "📅 Календарь"]
         if text.startswith("/") or text in cancel_texts:
             # Пользователь передумал - выходим из режима добавления через календарь
             pending_calendar_task.pop(user_id, None)
@@ -1111,88 +1128,64 @@ async def smart_handler(message: types.Message):
             await message.answer(f"📝 «{text}»\n\nКак повторять?", reply_markup=keyboard)
             return
 
-    # ===== ОЖИДАЕМ СУММУ ДЛЯ КОНВЕРТАЦИИ ПОСЛЕ КНОПКИ "💱 Курс USD→RUB" =====
-    if user_id in waiting_for_conversion_usd:
-        if text.startswith("/") or text in ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "💱 Курс EUR (Альфа)", "📅 Календарь"]:
-            # Пользователь передумал и нажал другую кнопку/команду - выходим из режима ожидания
-            waiting_for_conversion_usd.discard(user_id)
+    # ===== ОЖИДАЕМ СУММУ ДЛЯ КОНВЕРТАЦИИ ПОСЛЕ КНОПКИ "💱 Курс USD/EUR" =====
+    if user_id in waiting_for_conversion_multi:
+        if text.startswith("/") or text in ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD/EUR", "📅 Календарь"]:
+            waiting_for_conversion_multi.discard(user_id)
         else:
-            parsed = parse_amount_and_currency_usd(text)
+            parsed = parse_amount_and_currency_multi(text)
             if not parsed:
-                # Не сбрасываем ожидание - даём попробовать ещё раз, не заставляя жать кнопку заново
                 await message.answer(
-                    "❌ Не понял сумму. Напишите, например: 100 usd или 9000 руб",
+                    "❌ Не понял сумму. Напишите, например: 100 usd, 100 евро или 9000 руб",
                     reply_markup=get_main_keyboard()
                 )
                 return
 
-            waiting_for_conversion_usd.discard(user_id)
+            waiting_for_conversion_multi.discard(user_id)
             amount, currency = parsed
-            result = get_usd_rub_via_byn_rate()
-            if not result or "error" in result:
-                error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
-                await message.answer(f"❌ Не удалось получить курс.\n\nДетали: {error_text}", reply_markup=get_main_keyboard())
-                return
 
-            rate = result["rate"]  # RUB за 1 USD
-            steps_line = (
-                f"(шаги: 1 USD = {result['usd_byn']:.4f} BYN → "
-                f"1 BYN = {result['byn_rub']:.4f} RUB → "
-                f"1 USD = {rate:.4f} RUB)"
-            )
-            if currency == "RUB":
-                converted = amount / rate
-                await message.answer(
-                    f"💱 {amount:.2f} RUB ≈ {converted:.2f} USD\n"
-                    f"{steps_line}",
-                    reply_markup=get_main_keyboard()
-                )
-            else:
+            if currency == "USD":
+                result = get_usd_rub_via_byn_rate()
+                if not result or "error" in result:
+                    error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
+                    await message.answer(f"❌ Не удалось получить курс USD.\n\nДетали: {error_text}", reply_markup=get_main_keyboard())
+                    return
+                rate = result["rate"]
                 converted = amount * rate
                 await message.answer(
                     f"💱 {amount:.2f} USD ≈ {converted:.2f} RUB\n"
-                    f"{steps_line}",
+                    f"(курс: 1 USD = {rate:.4f} RUB)",
                     reply_markup=get_main_keyboard()
                 )
-            return
 
-    # ===== ОЖИДАЕМ СУММУ ДЛЯ КОНВЕРТАЦИИ ПОСЛЕ КНОПКИ "💱 Курс EUR (Альфа)" =====
-    if user_id in waiting_for_conversion_eur:
-        if text.startswith("/") or text in ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "💱 Курс EUR (Альфа)", "📅 Календарь"]:
-            waiting_for_conversion_eur.discard(user_id)
-        else:
-            parsed = parse_amount_and_currency_eur(text)
-            if not parsed:
-                await message.answer(
-                    "❌ Не понял сумму. Напишите, например: 100 евро или 9000 руб",
-                    reply_markup=get_main_keyboard()
-                )
-                return
-
-            waiting_for_conversion_eur.discard(user_id)
-            amount, currency = parsed
-            result = get_alfabank_eur_rub_rate()
-            if not result or "error" in result:
-                error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
-                await message.answer(f"❌ Не удалось получить курс.\n\nДетали: {error_text}", reply_markup=get_main_keyboard())
-                return
-
-            if currency == "RUB":
-                # Продаём RUB, покупаем EUR - банк продаёт евро по курсу "sell"
-                converted = amount / result["sell"]
-                await message.answer(
-                    f"💱 {amount:.2f} RUB ≈ {converted:.2f} EUR\n"
-                    f"(курс продажи: 1 EUR = {result['sell']:.2f} RUB)",
-                    reply_markup=get_main_keyboard()
-                )
-            else:
-                # Продаём EUR, покупаем RUB - банк покупает евро по курсу "buy"
+            elif currency == "EUR":
+                result = get_alfabank_eur_rub_rate()
+                if not result or "error" in result:
+                    error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
+                    await message.answer(f"❌ Не удалось получить курс EUR.\n\nДетали: {error_text}", reply_markup=get_main_keyboard())
+                    return
                 converted = amount * result["buy"]
                 await message.answer(
                     f"💱 {amount:.2f} EUR ≈ {converted:.2f} RUB\n"
                     f"(курс покупки: 1 EUR = {result['buy']:.2f} RUB)",
                     reply_markup=get_main_keyboard()
                 )
+
+            else:  # RUB - показываем конвертацию сразу в обе валюты
+                usd_result = get_usd_rub_via_byn_rate()
+                eur_result = get_alfabank_eur_rub_rate()
+                lines = [f"💱 {amount:.2f} RUB ≈"]
+                if usd_result and "error" not in usd_result:
+                    lines.append(f"{amount / usd_result['rate']:.2f} USD (курс: 1 USD = {usd_result['rate']:.4f} RUB)")
+                else:
+                    error_text = usd_result.get("error", "неизвестная ошибка") if usd_result else "неизвестная ошибка"
+                    lines.append(f"⚠️ USD недоступен ({error_text})")
+                if eur_result and "error" not in eur_result:
+                    lines.append(f"{amount / eur_result['sell']:.2f} EUR (курс продажи: 1 EUR = {eur_result['sell']:.2f} RUB)")
+                else:
+                    error_text = eur_result.get("error", "неизвестная ошибка") if eur_result else "неизвестная ошибка"
+                    lines.append(f"⚠️ EUR недоступен ({error_text})")
+                await message.answer("\n".join(lines), reply_markup=get_main_keyboard())
             return
 
     # ===== ЕСЛИ В ТЕКСТЕ ЕСТЬ "НАПОМНИ" =====
@@ -1230,7 +1223,7 @@ async def smart_handler(message: types.Message):
         return
 
     # ===== ЕСЛИ ЭТО КОМАНДА ИЛИ КНОПКА — ИГНОРИРУЕМ =====
-    if text.startswith("/") or text in ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "💱 Курс EUR (Альфа)", "📅 Календарь"]:
+    if text.startswith("/") or text in ["➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD/EUR", "📅 Календарь"]:
         return
 
     # ===== "ДОБАВЬ ЗАДАЧУ" =====
