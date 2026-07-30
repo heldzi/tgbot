@@ -229,7 +229,9 @@ def get_byn_rub_tinkoff_rate():
 def get_usd_rub_via_byn_rate():
     """
     Итоговый курс: USD -> BYN (продажа, Статусбанк) -> RUB (Т-Банк).
-    Возвращает {"rate": float} (RUB за 1 USD) либо {"error": "..."}.
+    Возвращает {"rate": float, "usd_byn": float, "byn_rub": float}
+    (rate = RUB за 1 USD, usd_byn = BYN за 1 USD, byn_rub = RUB за 1 BYN)
+    либо {"error": "..."}.
     """
     usd_byn = get_usd_byn_sell_rate()
     if "error" in usd_byn:
@@ -239,7 +241,11 @@ def get_usd_rub_via_byn_rate():
     if "error" in byn_rub:
         return {"error": f"Шаг BYN->RUB (Т-Банк): {byn_rub['error']}"}
 
-    return {"rate": usd_byn["rate"] * byn_rub["rate"]}
+    return {
+        "rate": usd_byn["rate"] * byn_rub["rate"],
+        "usd_byn": usd_byn["rate"],
+        "byn_rub": byn_rub["rate"]
+    }
 
 
 def parse_amount_and_currency_usd(text):
@@ -357,7 +363,12 @@ async def kurs_usd_button(message: types.Message):
     result = get_usd_rub_via_byn_rate()
 
     if result and "error" not in result:
-        rate_line = f"📊 Текущий курс: 1 USD = {result['rate']:.4f} RUB\n\n"
+        rate_line = (
+            f"📊 Расчёт по шагам:\n"
+            f"1) USD → BYN (Статусбанк, продажа): 1 USD = {result['usd_byn']:.4f} BYN\n"
+            f"2) BYN → RUB (Т-Банк): 1 BYN = {result['byn_rub']:.4f} RUB\n"
+            f"Итого: 1 USD = {result['rate']:.4f} RUB\n\n"
+        )
     else:
         error_text = result.get("error", "неизвестная ошибка") if result else "неизвестная ошибка"
         rate_line = f"⚠️ Не удалось получить текущий курс (детали: {error_text})\n\n"
@@ -497,7 +508,9 @@ async def kurs_command(message: types.Message):
 
     await message.answer(
         f"💱 Курс USD → RUB (через BYN: Статусбанк + Т-Банк)\n\n"
-        f"1 USD = {result['rate']:.4f} RUB",
+        f"1) USD → BYN (Статусбанк, продажа): 1 USD = {result['usd_byn']:.4f} BYN\n"
+        f"2) BYN → RUB (Т-Банк): 1 BYN = {result['byn_rub']:.4f} RUB\n"
+        f"Итого: 1 USD = {result['rate']:.4f} RUB",
         reply_markup=get_main_keyboard()
     )
 
@@ -583,18 +596,23 @@ async def smart_handler(message: types.Message):
                 return
 
             rate = result["rate"]  # RUB за 1 USD
+            steps_line = (
+                f"(шаги: 1 USD = {result['usd_byn']:.4f} BYN → "
+                f"1 BYN = {result['byn_rub']:.4f} RUB → "
+                f"1 USD = {rate:.4f} RUB)"
+            )
             if currency == "RUB":
                 converted = amount / rate
                 await message.answer(
                     f"💱 {amount:.2f} RUB ≈ {converted:.2f} USD\n"
-                    f"(курс: 1 USD = {rate:.4f} RUB)",
+                    f"{steps_line}",
                     reply_markup=get_main_keyboard()
                 )
             else:
                 converted = amount * rate
                 await message.answer(
                     f"💱 {amount:.2f} USD ≈ {converted:.2f} RUB\n"
-                    f"(курс: 1 USD = {rate:.4f} RUB)",
+                    f"{steps_line}",
                     reply_markup=get_main_keyboard()
                 )
             return
