@@ -6,6 +6,7 @@ import datetime
 import re
 import json
 import uuid
+import calendar
 from dateutil.relativedelta import relativedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -88,6 +89,7 @@ def get_main_keyboard():
                 KeyboardButton(text="🗑 Удалить задачу")
             ],
             [
+                KeyboardButton(text="📅 Календарь"),
                 KeyboardButton(text="⏰ Напомнить"),
                 KeyboardButton(text="💱 Курс USD→RUB")
             ]
@@ -105,6 +107,29 @@ def init_db():
                     text TEXT, 
                     date TEXT, 
                     remind_time TEXT)''')
+
+    # Миграция: добавляем колонки для календаря/повторов/статуса выполнения,
+    # если их ещё нет (безопасно для уже существующих баз - ALTER TABLE
+    # только добавляет колонки, старые данные не трогает).
+    existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(tasks)").fetchall()}
+    if "due_date" not in existing_cols:
+        cur.execute("ALTER TABLE tasks ADD COLUMN due_date TEXT")
+    if "recurrence" not in existing_cols:
+        cur.execute("ALTER TABLE tasks ADD COLUMN recurrence TEXT")
+    if "completed" not in existing_cols:
+        cur.execute("ALTER TABLE tasks ADD COLUMN completed INTEGER DEFAULT 0")
+    # У старых задач (созданных до этой фичи) due_date пуст - проставляем
+    # дату создания, чтобы они не пропали из календаря.
+    cur.execute("UPDATE tasks SET due_date = substr(date, 1, 10) WHERE due_date IS NULL AND date IS NOT NULL")
+
+    # Отдельная таблица для отметок выполнения ПОВТОРЯЮЩИХСЯ задач - у одной
+    # повторяющейся задачи может быть много "выполненных" дат, поэтому это
+    # не колонка в tasks, а отдельные записи (task_id, конкретная дата).
+    cur.execute('''CREATE TABLE IF NOT EXISTS task_completions
+                   (task_id INTEGER,
+                    completion_date TEXT,
+                    PRIMARY KEY (task_id, completion_date))''')
+
     conn.commit()
     conn.close()
 
@@ -265,19 +290,233 @@ def parse_amount_and_currency_usd(text):
     return None
 
 
-def save_task_to_db(text, remind_time=None):
+def save_task_to_db(text, remind_time=None, due_date=None, recurrence=None):
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
     now_moscow = get_moscow_now()
+    if due_date is None:
+        due_date = now_moscow.strftime("%Y-%m-%d")  # без явной даты - задача на сегодня
     if remind_time:
-        cur.execute("INSERT INTO tasks (text, date, remind_time) VALUES (?, ?, ?)", 
-                    (text, now_moscow.strftime("%Y-%m-%d %H:%M"), 
-                     remind_time.strftime("%Y-%m-%d %H:%M")))
+        cur.execute(
+            "INSERT INTO tasks (text, date, remind_time, due_date, recurrence, completed) VALUES (?, ?, ?, ?, ?, 0)",
+            (text, now_moscow.strftime("%Y-%m-%d %H:%M"),
+             remind_time.strftime("%Y-%m-%d %H:%M"), due_date, recurrence)
+        )
     else:
-        cur.execute("INSERT INTO tasks (text, date) VALUES (?, ?)", 
-                    (text, now_moscow.strftime("%Y-%m-%d %H:%M")))
+        cur.execute(
+            "INSERT INTO tasks (text, date, due_date, recurrence, completed) VALUES (?, ?, ?, ?, 0)",
+            (text, now_moscow.strftime("%Y-%m-%d %H:%M"), due_date, recurrence)
+        )
     conn.commit()
     conn.close()
+
+# ===== Календарь задач: повторы, выборка по дню, статус выполнения =====
+
+RU_MONTHS = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+             "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+WEEKDAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+# Пользователи в процессе добавления задачи через календарь:
+# user_id -> {"due_date": "YYYY-MM-DD", "text": "...", "weekdays": {0,2,4}}
+pending_calendar_task = {}
+
+
+def task_occurs_on(due_date, recurrence, date_str):
+    """
+    Определяет, приходится ли задача (с датой начала due_date и правилом
+    повтора recurrence) на конкретный день date_str.
+    recurrence: None - разовая (только сам due_date); "daily" - каждый день
+    начиная с due_date; "weekly:0,2,4" - по указанным дням недели
+    (0=понедельник..6=воскресенье), начиная с due_date.
+    """
+    if not due_date or date_str < due_date:
+        return False
+    if not recurrence:
+        return date_str == due_date
+    if recurrence == "daily":
+        return True
+    if recurrence.startswith("weekly:"):
+        try:
+            weekdays = {int(x) for x in recurrence.split(":", 1)[1].split(",") if x}
+        except ValueError:
+            return False
+        d = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+        return d.weekday() in weekdays
+    return False
+
+
+def get_tasks_for_date(date_str):
+    """Возвращает список задач (разовых и повторяющихся), приходящихся на date_str."""
+    conn = sqlite3.connect('tasks.db')
+    cur = conn.cursor()
+    cur.execute("SELECT id, text, due_date, recurrence, completed FROM tasks")
+    rows = cur.fetchall()
+    cur.execute("SELECT task_id FROM task_completions WHERE completion_date = ?", (date_str,))
+    completed_today_ids = {r[0] for r in cur.fetchall()}
+    conn.close()
+
+    result = []
+    for task_id, text, due_date, recurrence, completed in rows:
+        if task_occurs_on(due_date, recurrence, date_str):
+            is_done = (task_id in completed_today_ids) if recurrence else bool(completed)
+            result.append({"id": task_id, "text": text, "recurrence": recurrence, "completed": is_done})
+    return result
+
+
+def toggle_task_completion(task_id, date_str):
+    """Переключает статус выполнения задачи на конкретную дату (для повторяющихся - через task_completions)."""
+    conn = sqlite3.connect('tasks.db')
+    cur = conn.cursor()
+    cur.execute("SELECT recurrence, completed FROM tasks WHERE id = ?", (task_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return
+    recurrence, completed = row
+    if recurrence:
+        cur.execute("SELECT 1 FROM task_completions WHERE task_id = ? AND completion_date = ?", (task_id, date_str))
+        if cur.fetchone():
+            cur.execute("DELETE FROM task_completions WHERE task_id = ? AND completion_date = ?", (task_id, date_str))
+        else:
+            cur.execute("INSERT INTO task_completions (task_id, completion_date) VALUES (?, ?)", (task_id, date_str))
+    else:
+        cur.execute("UPDATE tasks SET completed = ? WHERE id = ?", (0 if completed else 1, task_id))
+    conn.commit()
+    conn.close()
+
+
+def build_calendar_keyboard(year, month):
+    cal = calendar.Calendar(firstweekday=0)
+    month_dates = list(cal.itermonthdates(year, month))
+
+    conn = sqlite3.connect('tasks.db')
+    cur = conn.cursor()
+    cur.execute("SELECT due_date, recurrence FROM tasks")
+    all_tasks = cur.fetchall()
+    conn.close()
+
+    days_with_tasks = set()
+    for date_obj in month_dates:
+        if date_obj.month != month:
+            continue
+        date_str = date_obj.strftime("%Y-%m-%d")
+        for due_date, recurrence in all_tasks:
+            if task_occurs_on(due_date, recurrence, date_str):
+                days_with_tasks.add(date_obj.day)
+                break
+
+    rows = [
+        [InlineKeyboardButton(text=f"{RU_MONTHS[month]} {year}", callback_data="cal_noop")],
+        [InlineKeyboardButton(text=w, callback_data="cal_noop") for w in WEEKDAY_LABELS]
+    ]
+
+    week_row = []
+    for date_obj in month_dates:
+        if date_obj.month != month:
+            week_row.append(InlineKeyboardButton(text=" ", callback_data="cal_noop"))
+        else:
+            label = f"{date_obj.day}•" if date_obj.day in days_with_tasks else str(date_obj.day)
+            week_row.append(InlineKeyboardButton(text=label, callback_data=f"cal_day:{date_obj.strftime('%Y-%m-%d')}"))
+        if len(week_row) == 7:
+            rows.append(week_row)
+            week_row = []
+    if week_row:
+        rows.append(week_row)
+
+    prev_month, prev_year = (12, year - 1) if month == 1 else (month - 1, year)
+    next_month, next_year = (1, year + 1) if month == 12 else (month + 1, year)
+
+    rows.append([
+        InlineKeyboardButton(text="◀", callback_data=f"cal_nav:{prev_year}:{prev_month}"),
+        InlineKeyboardButton(text="Сегодня", callback_data="cal_today"),
+        InlineKeyboardButton(text="▶", callback_data=f"cal_nav:{next_year}:{next_month}")
+    ])
+    rows.append([
+        InlineKeyboardButton(text="📋 Все задачи", callback_data="cal_all"),
+        InlineKeyboardButton(text="✅ Выполненные", callback_data="cal_done")
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def render_day_view(date_str):
+    tasks = get_tasks_for_date(date_str)
+    rows = []
+    for t in tasks:
+        prefix = "✅ " if t["completed"] else "☐ "
+        rec_marker = " 🔁" if t["recurrence"] else ""
+        rows.append([InlineKeyboardButton(
+            text=f"{prefix}{t['text'][:40]}{rec_marker}",
+            callback_data=f"task_toggle:{t['id']}:{date_str}"
+        )])
+    rows.append([InlineKeyboardButton(text="➕ Добавить задачу на этот день", callback_data=f"task_add_day:{date_str}")])
+    rows.append([InlineKeyboardButton(text="◀ Назад к календарю", callback_data="cal_today")])
+
+    text = f"📅 {date_str}\n\nЗадачи на этот день:" if tasks else f"📅 {date_str}\n\nЗадач нет."
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def render_all_tasks_view():
+    conn = sqlite3.connect('tasks.db')
+    cur = conn.cursor()
+    cur.execute("SELECT id, text, due_date, recurrence, completed FROM tasks ORDER BY due_date")
+    rows_data = cur.fetchall()
+    conn.close()
+
+    rows = []
+    for task_id, text, due_date, recurrence, completed in rows_data:
+        if recurrence:
+            rec_label = " (ежедневно)" if recurrence == "daily" else " (по дням недели)"
+            status = "🔁"
+        else:
+            status = "✅" if completed else "☐"
+            rec_label = ""
+        label = f"{status} {due_date or '-'}: {text[:30]}{rec_label}"
+        cb = f"cal_day:{due_date}" if due_date else "cal_noop"
+        rows.append([InlineKeyboardButton(text=label, callback_data=cb)])
+    rows.append([InlineKeyboardButton(text="◀ Назад к календарю", callback_data="cal_today")])
+
+    text = "📋 Все задачи (нажмите, чтобы открыть день):" if rows_data else "📋 Задач нет."
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def render_completed_view():
+    conn = sqlite3.connect('tasks.db')
+    cur = conn.cursor()
+    cur.execute("SELECT id, text, due_date FROM tasks WHERE completed = 1 AND (recurrence IS NULL OR recurrence = '')")
+    one_time_done = cur.fetchall()
+    cur.execute("""SELECT t.id, t.text, tc.completion_date FROM task_completions tc
+                    JOIN tasks t ON t.id = tc.task_id
+                    ORDER BY tc.completion_date DESC""")
+    recurring_done = cur.fetchall()
+    conn.close()
+
+    rows = []
+    for task_id, text, due_date in one_time_done:
+        rows.append([InlineKeyboardButton(
+            text=f"✅ {due_date or '-'}: {text[:30]}",
+            callback_data=f"task_toggle:{task_id}:{due_date}"
+        )])
+    for task_id, text, completion_date in recurring_done:
+        rows.append([InlineKeyboardButton(
+            text=f"✅ {completion_date}: {text[:30]} 🔁",
+            callback_data=f"task_toggle:{task_id}:{completion_date}"
+        )])
+
+    has_items = bool(one_time_done or recurring_done)
+    rows.append([InlineKeyboardButton(text="◀ Назад к календарю", callback_data="cal_today")])
+
+    text = "✅ Выполненные задачи (нажмите, чтобы вернуть в невыполненные):" if has_items else "✅ Выполненных задач пока нет."
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_weekday_selection_keyboard(selected):
+    row = []
+    for i, lbl in enumerate(WEEKDAY_LABELS):
+        text = f"✅{lbl}" if i in selected else lbl
+        row.append(InlineKeyboardButton(text=text, callback_data=f"recur_wd_toggle:{i}"))
+    return InlineKeyboardMarkup(inline_keyboard=[row, [InlineKeyboardButton(text="Готово", callback_data="recur_wd_done")]])
+
 
 def get_task_confirmation_keyboard(task_text, remind_time=None):
     # NEW: callback_data теперь содержит только короткий id,
@@ -377,6 +616,153 @@ async def kurs_usd_button(message: types.Message):
         "Например: 100 usd или 9000 руб",
         reply_markup=get_main_keyboard()
     )
+
+@dp.message(lambda message: message.text == "📅 Календарь")
+async def calendar_button(message: types.Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Доступ запрещён.")
+        return
+    now = get_moscow_now()
+    await message.answer("📅 Календарь задач", reply_markup=build_calendar_keyboard(now.year, now.month))
+
+
+@dp.callback_query(lambda c: c.data == "cal_noop")
+async def cal_noop_handler(callback: types.CallbackQuery):
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("cal_nav:"))
+async def cal_nav_handler(callback: types.CallbackQuery):
+    _, year_str, month_str = callback.data.split(":")
+    await callback.message.edit_text(
+        "📅 Календарь задач",
+        reply_markup=build_calendar_keyboard(int(year_str), int(month_str))
+    )
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "cal_today")
+async def cal_today_handler(callback: types.CallbackQuery):
+    now = get_moscow_now()
+    await callback.message.edit_text(
+        "📅 Календарь задач",
+        reply_markup=build_calendar_keyboard(now.year, now.month)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("cal_day:"))
+async def cal_day_handler(callback: types.CallbackQuery):
+    date_str = callback.data.split(":", 1)[1]
+    text, keyboard = render_day_view(date_str)
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "cal_all")
+async def cal_all_handler(callback: types.CallbackQuery):
+    text, keyboard = render_all_tasks_view()
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "cal_done")
+async def cal_done_handler(callback: types.CallbackQuery):
+    text, keyboard = render_completed_view()
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("task_toggle:"))
+async def task_toggle_handler(callback: types.CallbackQuery):
+    _, task_id_str, date_str = callback.data.split(":", 2)
+    toggle_task_completion(int(task_id_str), date_str)
+    # Обновляем тот же экран, с которого пришли (день или список выполненных)
+    if callback.message.text and callback.message.text.startswith("✅ Выполненные"):
+        text, keyboard = render_completed_view()
+    else:
+        text, keyboard = render_day_view(date_str)
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("task_add_day:"))
+async def task_add_day_handler(callback: types.CallbackQuery):
+    date_str = callback.data.split(":", 1)[1]
+    pending_calendar_task[callback.from_user.id] = {"due_date": date_str}
+    await callback.message.answer(f"✏️ Напишите текст задачи на {date_str}:")
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "recur_none")
+async def recur_none_handler(callback: types.CallbackQuery):
+    pending = pending_calendar_task.pop(callback.from_user.id, None)
+    if not pending or "text" not in pending:
+        await callback.answer("Сессия добавления истекла, начните заново.", show_alert=True)
+        return
+    save_task_to_db(pending["text"], due_date=pending["due_date"], recurrence=None)
+    text, keyboard = render_day_view(pending["due_date"])
+    await callback.message.edit_text(f"✅ Задача добавлена!\n\n{text}", reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "recur_daily")
+async def recur_daily_handler(callback: types.CallbackQuery):
+    pending = pending_calendar_task.pop(callback.from_user.id, None)
+    if not pending or "text" not in pending:
+        await callback.answer("Сессия добавления истекла, начните заново.", show_alert=True)
+        return
+    save_task_to_db(pending["text"], due_date=pending["due_date"], recurrence="daily")
+    text, keyboard = render_day_view(pending["due_date"])
+    await callback.message.edit_text(f"✅ Задача добавлена (ежедневно)!\n\n{text}", reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "recur_weekly_start")
+async def recur_weekly_start_handler(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in pending_calendar_task or "text" not in pending_calendar_task[user_id]:
+        await callback.answer("Сессия добавления истекла, начните заново.", show_alert=True)
+        return
+    pending_calendar_task[user_id]["weekdays"] = set()
+    await callback.message.edit_text(
+        "Выберите дни недели (нажмите нужные, потом «Готово»):",
+        reply_markup=build_weekday_selection_keyboard(set())
+    )
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("recur_wd_toggle:"))
+async def recur_wd_toggle_handler(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in pending_calendar_task or "weekdays" not in pending_calendar_task[user_id]:
+        await callback.answer("Сессия добавления истекла, начните заново.", show_alert=True)
+        return
+    wd = int(callback.data.split(":", 1)[1])
+    selected = pending_calendar_task[user_id]["weekdays"]
+    selected.discard(wd) if wd in selected else selected.add(wd)
+    await callback.message.edit_reply_markup(reply_markup=build_weekday_selection_keyboard(selected))
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "recur_wd_done")
+async def recur_wd_done_handler(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    pending = pending_calendar_task.get(user_id)
+    if not pending or "weekdays" not in pending:
+        await callback.answer("Сессия добавления истекла, начните заново.", show_alert=True)
+        return
+    selected = pending["weekdays"]
+    if not selected:
+        await callback.answer("Выберите хотя бы один день.", show_alert=True)
+        return
+    recurrence = "weekly:" + ",".join(str(x) for x in sorted(selected))
+    save_task_to_db(pending["text"], due_date=pending["due_date"], recurrence=recurrence)
+    pending_calendar_task.pop(user_id, None)
+    text, keyboard = render_day_view(pending["due_date"])
+    await callback.message.edit_text(f"✅ Задача добавлена (по дням недели)!\n\n{text}", reply_markup=keyboard)
+    await callback.answer()
+
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("del_task_"))
 async def delete_task_by_callback(callback: types.CallbackQuery):
@@ -569,9 +955,25 @@ async def smart_handler(message: types.Message):
     text = message.text.strip()
     user_id = message.from_user.id
 
+    # ===== ЖДЁМ ТЕКСТ ЗАДАЧИ ПОСЛЕ "➕ Добавить задачу на этот день" (календарь) =====
+    if user_id in pending_calendar_task and "text" not in pending_calendar_task[user_id]:
+        cancel_texts = ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "📅 Календарь"]
+        if text.startswith("/") or text in cancel_texts:
+            # Пользователь передумал - выходим из режима добавления через календарь
+            pending_calendar_task.pop(user_id, None)
+        else:
+            pending_calendar_task[user_id]["text"] = text
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Разовая", callback_data="recur_none")],
+                [InlineKeyboardButton(text="Каждый день", callback_data="recur_daily")],
+                [InlineKeyboardButton(text="По дням недели", callback_data="recur_weekly_start")]
+            ])
+            await message.answer(f"📝 «{text}»\n\nКак повторять?", reply_markup=keyboard)
+            return
+
     # ===== ОЖИДАЕМ СУММУ ДЛЯ КОНВЕРТАЦИИ ПОСЛЕ КНОПКИ "💱 Курс USD→RUB" =====
     if user_id in waiting_for_conversion_usd:
-        if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB"]:
+        if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "📅 Календарь"]:
             # Пользователь передумал и нажал другую кнопку/команду - выходим из режима ожидания
             waiting_for_conversion_usd.discard(user_id)
         else:
@@ -649,7 +1051,7 @@ async def smart_handler(message: types.Message):
         return
 
     # ===== ЕСЛИ ЭТО КОМАНДА ИЛИ КНОПКА — ИГНОРИРУЕМ =====
-    if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB"]:
+    if text.startswith("/") or text in ["📝 Мои задачи", "➕ Добавить задачу", "🗑 Удалить задачу", "⏰ Напомнить", "💱 Курс USD→RUB", "📅 Календарь"]:
         return
 
     # ===== "ДОБАВЬ ЗАДАЧУ" =====
