@@ -167,7 +167,7 @@ def ask_deepseek(question, user_id):
     data = {
         "model": "deepseek-v4-flash",
         "messages": [{"role": "user", "content": full_prompt}],
-        "max_tokens": 500
+        "max_tokens": 2000
     }
     try:
         response = requests.post(url, json=data, headers=headers, timeout=30)
@@ -213,8 +213,9 @@ def get_usd_byn_sell_rate():
 
 def get_byn_rub_tinkoff_rate():
     """
-    Курс BYN -> RUB Т-Банка. Категория "DebitCardsTransfers" - подобрана
-    пользователем как наиболее точно соответствующая его операции.
+    Курс BYN -> RUB Т-Банка. Категория "ATMCashoutRateGroup" - "Снятие
+    наличных в банкомате другого банка", подобрана пользователем как
+    соответствующая его операции.
     Возвращает {"rate": float} (RUB за 1 BYN) либо {"error": "..."}.
     """
     try:
@@ -239,10 +240,10 @@ def get_byn_rub_tinkoff_rate():
         data = response.json()
         rates = data.get("payload", {}).get("rates", [])
         for item in rates:
-            if item.get("category") == "DebitCardsTransfers":
+            if item.get("category") == "ATMCashoutRateGroup":
                 return {"rate": float(item["sell"])}
 
-        return {"error": f"Не нашёл категорию DebitCardsTransfers в ответе: {str(data)[:300]}"}
+        return {"error": f"Не нашёл категорию ATMCashoutRateGroup в ответе: {str(data)[:300]}"}
     except Exception as e:
         return {"error": f"Исключение: {e}"}
 
@@ -881,10 +882,10 @@ async def remind_command(message: types.Message):
         return
     
     task_text = re.sub(r'\d{1,2}[:.-]\d{2}', '', text)
-    task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', task_text, flags=re.IGNORECASE)
+    task_text = re.sub(r'через\s+\d+\s*(минут\w*|час\w*)', '', task_text, flags=re.IGNORECASE)
     task_text = re.sub(r'завтра\s+в', '', task_text, flags=re.IGNORECASE)
     task_text = re.sub(r'сегодня\s+в', '', task_text, flags=re.IGNORECASE)
-    task_text = re.sub(r'в', '', task_text)
+    task_text = re.sub(r'\bв\b', '', task_text)
     task_text = re.sub(r'\s+', ' ', task_text).strip()
     
     if not task_text:
@@ -985,10 +986,10 @@ async def smart_handler(message: types.Message):
             remind_time = parse_time_from_text(text)
             if remind_time:
                 task_text = re.sub(r'\d{1,2}[:.-]\d{2}', '', text)
-                task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', task_text, flags=re.IGNORECASE)
+                task_text = re.sub(r'через\s+\d+\s*(минут\w*|час\w*)', '', task_text, flags=re.IGNORECASE)
                 task_text = re.sub(r'завтра\s+в', '', task_text, flags=re.IGNORECASE)
                 task_text = re.sub(r'сегодня\s+в', '', task_text, flags=re.IGNORECASE)
-                task_text = re.sub(r'в', '', task_text)
+                task_text = re.sub(r'\bв\b', '', task_text)
                 task_text = re.sub(r'\s+', ' ', task_text).strip()
                 if not task_text:
                     await message.answer("❌ Я не понял, что именно нужно сделать.", reply_markup=get_main_keyboard())
@@ -1081,10 +1082,10 @@ async def smart_handler(message: types.Message):
         
         # Удаляем из текста всё, что связано с временем
         task_text = re.sub(r'\d{1,2}[:.-]\d{2}', '', clean_text)
-        task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'через\s+\d+\s*(минут\w*|час\w*)', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'завтра\s+в', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'сегодня\s+в', '', task_text, flags=re.IGNORECASE)
-        task_text = re.sub(r'в', '', task_text)
+        task_text = re.sub(r'\bв\b', '', task_text)
         task_text = re.sub(r'\s+', ' ', task_text).strip()
         
         if not task_text:
@@ -1131,10 +1132,10 @@ async def smart_handler(message: types.Message):
     remind_time = parse_time_from_text(text)
     if remind_time:
         task_text = re.sub(r'\d{1,2}[:.-]\d{2}', '', text)
-        task_text = re.sub(r'через\s+\d+\s*(минут|минуты|минуту|час|часа|часов)', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'через\s+\d+\s*(минут\w*|час\w*)', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'завтра\s+в', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'сегодня\s+в', '', task_text, flags=re.IGNORECASE)
-        task_text = re.sub(r'в', '', task_text)
+        task_text = re.sub(r'\bв\b', '', task_text)
         task_text = re.sub(r'\s+', ' ', task_text).strip()
         
         if not task_text:
