@@ -297,7 +297,13 @@ def get_alfabank_eur_rub_rate():
             "https://alfabank.ru/api/v1/scrooge/currencies/alfa-rates",
             params=params,
             timeout=15,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                "Accept": "application/json",
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Referer": "https://alfabank.ru/currency/",
+                "Origin": "https://alfabank.ru"
+            },
             # Сеть между сервером и alfabank.ru подменяет сертификат
             # (self-signed certificate in certificate chain) - похоже на
             # DPI/прокси на сетевом пути. Отключаем проверку, т.к. тут
