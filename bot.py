@@ -315,6 +315,14 @@ RU_MONTHS = ["", "Январь", "Февраль", "Март", "Апрель", "
              "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
 WEEKDAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
+# Telegram не даёт красить отдельные инлайн-кнопки (ограничение самого Bot
+# API), поэтому "сегодня" выделяем кружочком вокруг цифры вместо цвета.
+CIRCLED_DIGITS = {
+    1: "①", 2: "②", 3: "③", 4: "④", 5: "⑤", 6: "⑥", 7: "⑦", 8: "⑧", 9: "⑨", 10: "⑩",
+    11: "⑪", 12: "⑫", 13: "⑬", 14: "⑭", 15: "⑮", 16: "⑯", 17: "⑰", 18: "⑱", 19: "⑲", 20: "⑳",
+    21: "㉑", 22: "㉒", 23: "㉓", 24: "㉔", 25: "㉕", 26: "㉖", 27: "㉗", 28: "㉘", 29: "㉙", 30: "㉚", 31: "㉛"
+}
+
 # Пользователи в процессе добавления задачи через календарь:
 # user_id -> {"due_date": "YYYY-MM-DD", "text": "...", "weekdays": {0,2,4}}
 pending_calendar_task = {}
@@ -423,7 +431,8 @@ def build_calendar_keyboard(year, month):
             is_today = date_obj == today
             has_tasks = date_obj.day in days_with_tasks
             if is_today:
-                label = f"[{date_obj.day}•]" if has_tasks else f"[{date_obj.day}]"
+                base = CIRCLED_DIGITS.get(date_obj.day, str(date_obj.day))
+                label = f"{base}•" if has_tasks else base
             else:
                 label = f"{date_obj.day}•" if has_tasks else str(date_obj.day)
             week_row.append(InlineKeyboardButton(text=label, callback_data=f"cal_day:{date_obj.strftime('%Y-%m-%d')}"))
@@ -469,7 +478,11 @@ def render_day_view(date_str):
 def render_all_tasks_view():
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
-    cur.execute("SELECT id, text, due_date, recurrence, completed FROM tasks ORDER BY due_date")
+    # Выполненные разовые задачи сюда не попадают - для них есть отдельный
+    # список "✅ Выполненные". Повторяющиеся задачи (recurrence != NULL)
+    # у tasks.completed всегда 0 (per-день статус хранится отдельно в
+    # task_completions), поэтому они всегда остаются в этом списке.
+    cur.execute("SELECT id, text, due_date, recurrence, completed FROM tasks WHERE completed = 0 ORDER BY due_date")
     rows_data = cur.fetchall()
     conn.close()
 
@@ -479,14 +492,14 @@ def render_all_tasks_view():
             rec_label = " (ежедневно)" if recurrence == "daily" else " (по дням недели)"
             status = "🔁"
         else:
-            status = "✅" if completed else "☐"
+            status = "☐"
             rec_label = ""
         label = f"{status} {due_date or '-'}: {text[:30]}{rec_label}"
         cb = f"cal_day:{due_date}" if due_date else "cal_noop"
         rows.append([InlineKeyboardButton(text=label, callback_data=cb)])
     rows.append([InlineKeyboardButton(text="◀ Назад к календарю", callback_data="cal_today")])
 
-    text = "📋 Все задачи (нажмите, чтобы открыть день):" if rows_data else "📋 Задач нет."
+    text = "📋 Задачи (нажмите, чтобы открыть день):" if rows_data else "📋 Невыполненных задач нет."
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
