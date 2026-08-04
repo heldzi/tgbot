@@ -436,6 +436,19 @@ pending_calendar_task = {}
 waiting_for_quick_task = set()
 
 
+def clear_pending_states(user_id):
+    """
+    Сбрасывает все "ожидающие текст" состояния пользователя. Вызывается в
+    начале каждого хендлера кнопки, которая запускает новый сценарий -
+    иначе, если пользователь не завершил один сценарий (например, начал
+    добавлять задачу через календарь и передумал) и нажал другую кнопку,
+    следующее сообщение могло по ошибке улететь в старый "зависший" сценарий.
+    """
+    waiting_for_quick_task.discard(user_id)
+    waiting_for_conversion_multi.discard(user_id)
+    pending_calendar_task.pop(user_id, None)
+
+
 def task_occurs_on(due_date, recurrence, date_str):
     """
     Определяет, приходится ли задача (с датой начала due_date и правилом
@@ -670,6 +683,7 @@ async def start_web():
 
 @dp.message(lambda message: message.text == "➕ Добавить задачу")
 async def add_task_button(message: types.Message):
+    clear_pending_states(message.from_user.id)
     waiting_for_quick_task.add(message.from_user.id)
     await message.answer(
         "✏️ Напишите текст задачи.\n"
@@ -679,6 +693,7 @@ async def add_task_button(message: types.Message):
 
 @dp.message(lambda message: message.text == "🗑 Удалить задачу")
 async def delete_task_button(message: types.Message):
+    clear_pending_states(message.from_user.id)
     conn = sqlite3.connect('tasks.db')
     cur = conn.cursor()
     cur.execute("SELECT id, text FROM tasks ORDER BY id")
@@ -707,6 +722,7 @@ async def delete_task_button(message: types.Message):
 
 @dp.message(lambda message: message.text == "⏰ Напомнить")
 async def remind_button(message: types.Message):
+    clear_pending_states(message.from_user.id)
     await message.answer(
         "⏰ Напишите что и когда нужно напомнить.\n"
         "Примеры: 'купить молоко в 15:00' или 'позвонить через 30 минут'",
@@ -718,6 +734,8 @@ async def kurs_multi_button(message: types.Message):
     if not is_allowed(message.from_user.id):
         await message.answer("⛔ Доступ запрещён.")
         return
+
+    clear_pending_states(message.from_user.id)
 
     usd_result = get_usd_rub_via_byn_rate()
     eur_result = get_alfabank_eur_rub_rate()
@@ -749,6 +767,7 @@ async def calendar_button(message: types.Message):
     if not is_allowed(message.from_user.id):
         await message.answer("⛔ Доступ запрещён.")
         return
+    clear_pending_states(message.from_user.id)
     now = get_moscow_now()
     await message.answer("📅 Календарь задач", reply_markup=build_calendar_keyboard(now.year, now.month))
 
@@ -816,6 +835,7 @@ async def task_toggle_handler(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data and c.data.startswith("task_add_day:"))
 async def task_add_day_handler(callback: types.CallbackQuery):
     date_str = callback.data.split(":", 1)[1]
+    clear_pending_states(callback.from_user.id)
     pending_calendar_task[callback.from_user.id] = {"due_date": date_str}
     await callback.message.answer(f"✏️ Напишите текст задачи на {date_str}:")
     await callback.answer()
